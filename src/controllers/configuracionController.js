@@ -67,8 +67,7 @@ exports.obtenerTasasBcv = async (req, res) => {
     console.error('Error en obtenerTasasBcv [BCV]:', error);
     return res.status(502).json({
       success: false,
-      error: 'No fue posible consultar la tasa de referencia del BCV.',
-      detail: error.message
+      error: 'No fue posible consultar la tasa de referencia del BCV.'
     });
   }
 };
