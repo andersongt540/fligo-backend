@@ -49,28 +49,34 @@ function downloadPaginaBcv() {
   });
 }
 
-exports.obtenerTasasBcv = async (req, res) => {
+async function obtenerDatosTasasBcv() {
   if (tasaBcvCache && Date.now() - tasaBcvFetchedAt < BCV_CACHE_DURATION_MS) {
-    return res.json({ success: true, data: tasaBcvCache });
+    return tasaBcvCache;
   }
+  const html = await downloadPaginaBcv();
+  const fechaValor = html.match(/Fecha\s+Valor:\s*(?:<[^>]*>\s*)*([^<]+)/i)?.[1]
+    ?.replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const tasas = {
+    usd_ves: parseTasaBcv(html, 'dolar'),
+    eur_ves: parseTasaBcv(html, 'euro'),
+    fecha_valor: fechaValor || null,
+    actualizado_en: new Date().toISOString(),
+    fuente: 'Banco Central de Venezuela'
+  };
+  tasaBcvCache = tasas;
+  tasaBcvFetchedAt = Date.now();
+  return tasas;
+}
+
+exports.obtenerDatosTasasBcv = obtenerDatosTasasBcv;
+
+exports.obtenerTasasBcv = async (req, res) => {
   try {
-    const html = await downloadPaginaBcv();
-    const fechaValor = html.match(/Fecha\s+Valor:\s*(?:<[^>]*>\s*)*([^<]+)/i)?.[1]
-      ?.replace(/<[^>]*>/g, '')
-      .replace(/&nbsp;|&#160;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const tasas = {
-      usd_ves: parseTasaBcv(html, 'dolar'),
-      eur_ves: parseTasaBcv(html, 'euro'),
-      fecha_valor: fechaValor || null,
-      actualizado_en: new Date().toISOString(),
-      fuente: 'Banco Central de Venezuela'
-    };
-    tasaBcvCache = tasas;
-    tasaBcvFetchedAt = Date.now();
-    return res.json({ success: true, data: tasas });
+    return res.json({ success: true, data: await obtenerDatosTasasBcv() });
   } catch (error) {
     console.error('Error en obtenerTasasBcv [BCV]:', error);
     return res.status(502).json({

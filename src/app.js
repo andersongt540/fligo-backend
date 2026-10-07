@@ -11,6 +11,7 @@ const reporteRoutes = require('./routes/reporteRoutes');
 const leadRoutes = require('./routes/leadRoutes');
 const comunicacionRoutes = require('./routes/comunicacionRoutes');
 const configuracionRoutes = require('./routes/configuracionRoutes');
+const suscripcionRoutes = require('./routes/suscripcionRoutes');
 
 const app = express();
 
@@ -36,6 +37,7 @@ app.use('/api/reportes', reporteRoutes);
 app.use('/api/leads', leadRoutes);
 app.use('/api/comunicaciones', comunicacionRoutes);
 app.use('/api/configuracion', configuracionRoutes);
+app.use('/api/suscripciones', suscripcionRoutes);
 app.use('/api', ventaRoutes);
 
 // Manejo de Rutas Inexistentes (404)
