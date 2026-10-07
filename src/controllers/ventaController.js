@@ -3,13 +3,21 @@ const { obtenerDatosTasasBcv } = require('./configuracionController');
 
 // 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
 exports.registrarVenta = async (req, res) => {
-  const { cliente_id, productos, metodo_pago, pagos, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
+  const { cliente_id, productos, metodo_pago, pagos, vuelto, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
   const tenant_id = req.user.tenant_id;
   const targetTiendaId = tienda_id || req.user.tienda_id;
   const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA']);
   let pagosValidados = null;
   let tasaPago = null;
   let igtfUsd = 0;
+  let vueltoValidado = null;
+
+  if (vuelto !== undefined) {
+    if (!vuelto || !['VES', 'USD'].includes(vuelto.moneda) || !Number.isFinite(Number(vuelto.monto)) || Number(vuelto.monto) < 0) {
+      return res.status(400).json({ success: false, error: 'El vuelto debe tener una moneda y un monto válidos no negativos.' });
+    }
+    vueltoValidado = { moneda: vuelto.moneda, monto: Number(vuelto.monto) };
+  }
 
   if (pagos !== undefined) {
     if (!Array.isArray(pagos) || pagos.length === 0 || pagos.some(pago =>
@@ -26,6 +34,7 @@ exports.registrarVenta = async (req, res) => {
       console.error('Error en registrarVenta [BCV]:', error);
       return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para convertir el pago y calcular el IGTF.' });
     }
+    let igtfUsdCentimos = 0;
     pagosValidados = pagos.map(pago => {
       const legacyUsdAmount = pago.moneda === undefined;
       const moneda = legacyUsdAmount ? 'USD' : pago.moneda;
@@ -37,17 +46,19 @@ exports.registrarVenta = async (req, res) => {
           ? Math.round(monto * 100)
           : Math.round(monto * tasaMoneda * 100);
       const igtfBsCentimos = pago.metodo_pago === 'DIVISA' ? Math.round(montoBsCentimos * 0.03) : 0;
-      const montoUsdCentimos = Math.round((montoBsCentimos + igtfBsCentimos) / tasaPago.usd_ves);
-      igtfUsd += igtfBsCentimos / 100 / tasaPago.usd_ves;
+      const montoUsdCentimos = Math.round(montoBsCentimos / tasaPago.usd_ves);
+      igtfUsdCentimos += Math.round(igtfBsCentimos / tasaPago.usd_ves);
       return {
         metodo_pago: pago.metodo_pago,
         moneda,
         monto,
         monto_usd: montoUsdCentimos / 100,
+        monto_usd_centimos: montoUsdCentimos,
         monto_bs_centimos: montoBsCentimos,
         igtf_bs_centimos: igtfBsCentimos
       };
     });
+    igtfUsd = igtfUsdCentimos / 100;
   }
 
   if (!productos || !Array.isArray(productos) || productos.length === 0) {
@@ -117,10 +128,16 @@ exports.registrarVenta = async (req, res) => {
     }
     const totalCalculado = subtotalCalculado + impuestoBase + igtfUsd - descuentoVenta;
     if (pagosValidados) {
-      const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + Math.round(pago.monto_usd * 100), 0);
-      if (Math.abs(montoPagadoCentavos - Math.round(totalCalculado * 100)) > 1) {
+      const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + pago.monto_usd_centimos, 0);
+      const vueltoBsCentimos = vueltoValidado
+        ? vueltoValidado.moneda === 'VES'
+          ? Math.round(vueltoValidado.monto * 100)
+          : Math.round(vueltoValidado.monto * tasaPago.usd_ves * 100)
+        : 0;
+      const vueltoUsdCentimos = Math.round(vueltoBsCentimos / tasaPago.usd_ves);
+      if (vueltoUsdCentimos > montoPagadoCentavos || Math.abs(montoPagadoCentavos - vueltoUsdCentimos - Math.round(totalCalculado * 100)) > 1) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'La suma de los pagos, incluido el IGTF de la divisa, debe coincidir con el total de la venta.' });
+        return res.status(400).json({ success: false, error: 'Los montos recibidos menos el vuelto deben cubrir exactamente el total de la venta y el IGTF.' });
       }
     }
     const metodoPagoVenta = pagosValidados
@@ -132,7 +149,8 @@ exports.registrarVenta = async (req, res) => {
       ? [
         notas,
         `Pagos: ${pagosValidados.map(pago => `${pago.metodo_pago}${pago.metodo_pago === 'DIVISA' ? ` ${pago.moneda}` : ''} ${pago.monto.toFixed(2)} ${pago.moneda}`).join('; ')}.`,
-        igtfUsd > 0 ? `IGTF 3% sobre pagos en divisa: Bs. ${(pagosValidados.reduce((total, pago) => total + pago.igtf_bs_centimos, 0) / 100).toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null
+        igtfUsd > 0 ? `IGTF 3% sobre toda la divisa recibida: Bs. ${(pagosValidados.reduce((total, pago) => total + pago.igtf_bs_centimos, 0) / 100).toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null,
+        vueltoValidado && vueltoValidado.monto > 0 ? `Vuelto entregado: ${vueltoValidado.monto.toFixed(2)} ${vueltoValidado.moneda}.` : null
       ].filter(Boolean).join('\n')
       : notas || null;
 
