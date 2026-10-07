@@ -38,7 +38,7 @@ exports.obtenerClientes = async (req, res) => {
 
   const offset = (page - 1) * limit;
   let params = [tenant_id];
-  let conditions = ['tenant_id = $1', 'activo = TRUE'];
+  let conditions = ['c.tenant_id = $1', 'c.activo = TRUE'];
 
   // Filtro por tienda si el usuario es un empleado con tienda asignada
   if (req.user.rol === 'EMPLOYEE' && req.user.tienda_id) {
@@ -58,7 +58,7 @@ exports.obtenerClientes = async (req, res) => {
   // Búsqueda por Nombre, Email o Documento de Identidad
   if (busqueda) {
     params.push(`%${busqueda}%`);
-    conditions.push(`(nombre ILIKE $${params.length} OR email ILIKE $${params.length} OR documento_identidad ILIKE $${params.length})`);
+    conditions.push(`(c.nombre ILIKE $${params.length} OR c.email ILIKE $${params.length} OR c.documento_identidad ILIKE $${params.length})`);
   }
 
   const whereClause = conditions.join(' AND ');
@@ -75,7 +75,7 @@ exports.obtenerClientes = async (req, res) => {
     `;
     
     // Consulta de total para la paginación
-    const totalQuery = `SELECT COUNT(*) FROM clientes WHERE ${whereClause}`;
+    const totalQuery = `SELECT COUNT(*) FROM clientes c WHERE ${whereClause}`;
 
     const [clientesRes, totalRes] = await Promise.all([
       db.query(clientesQuery, [...params, limit, offset]),
