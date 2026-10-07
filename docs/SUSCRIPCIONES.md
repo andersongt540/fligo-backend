@@ -27,6 +27,7 @@ No guardes estos valores en Firebase ni en los archivos del frontend.
 - Los planes son diaria (USD 3 por 1 día), semanal (USD 7 por 7 días) y mensual (USD 20 por 30 días).
 - El backend consulta la tasa USD del BCV, calcula el monto en bolívares y compara el monto reportado con el importe esperado en el momento de enviar la solicitud.
 - El titular informa teléfono, documento del pagador, monto, referencia y fecha. No se solicita ni almacena ninguna clave bancaria.
+- En el formulario, el botón verde «Reportar pago» registra la solicitud pendiente y abre WhatsApp con un mensaje preparado que incluye empresa, plan, monto, fecha y referencia. El usuario debe revisar y enviar ese mensaje desde WhatsApp.
 - La solicitud queda `PENDIENTE`. Un usuario administrativo verifica el abono en Mercantil y la aprueba o rechaza desde Fligo.
 - Al aprobar, el plan y la fecha de vencimiento del tenant se actualizan. La duración aprobada se suma al vencimiento vigente si la suscripción aún no ha expirado.
 
