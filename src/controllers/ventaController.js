@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { obtenerDatosTasasBcv } = require('./configuracionController');
 
 // 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
 exports.registrarVenta = async (req, res) => {
@@ -7,14 +8,46 @@ exports.registrarVenta = async (req, res) => {
   const targetTiendaId = tienda_id || req.user.tienda_id;
   const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA']);
   let pagosValidados = null;
+  let tasaPago = null;
+  let igtfUsd = 0;
 
   if (pagos !== undefined) {
     if (!Array.isArray(pagos) || pagos.length === 0 || pagos.some(pago =>
       !pago || !metodosPermitidos.has(pago.metodo_pago) || !Number.isFinite(Number(pago.monto)) || Number(pago.monto) <= 0
+      || (pago.moneda !== undefined && !['VES', 'USD', 'EUR'].includes(pago.moneda))
+      || (pago.metodo_pago === 'DIVISA' && pago.moneda === 'VES')
+      || (pago.metodo_pago !== 'DIVISA' && pago.moneda !== undefined && pago.moneda !== 'VES')
     )) {
       return res.status(400).json({ success: false, error: 'Debes indicar al menos un método de pago válido y su monto.' });
     }
-    pagosValidados = pagos.map(pago => ({ metodo_pago: pago.metodo_pago, monto: Number(pago.monto) }));
+    try {
+      tasaPago = await obtenerDatosTasasBcv();
+    } catch (error) {
+      console.error('Error en registrarVenta [BCV]:', error);
+      return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para convertir el pago y calcular el IGTF.' });
+    }
+    pagosValidados = pagos.map(pago => {
+      const legacyUsdAmount = pago.moneda === undefined;
+      const moneda = legacyUsdAmount ? 'USD' : pago.moneda;
+      const monto = Number(pago.monto);
+      const tasaMoneda = moneda === 'EUR' ? tasaPago.eur_ves : tasaPago.usd_ves;
+      const montoBsCentimos = legacyUsdAmount
+        ? Math.round(monto * tasaPago.usd_ves * 100)
+        : moneda === 'VES'
+          ? Math.round(monto * 100)
+          : Math.round(monto * tasaMoneda * 100);
+      const igtfBsCentimos = pago.metodo_pago === 'DIVISA' ? Math.round(montoBsCentimos * 0.03) : 0;
+      const montoUsdCentimos = Math.round((montoBsCentimos + igtfBsCentimos) / tasaPago.usd_ves);
+      igtfUsd += igtfBsCentimos / 100 / tasaPago.usd_ves;
+      return {
+        metodo_pago: pago.metodo_pago,
+        moneda,
+        monto,
+        monto_usd: montoUsdCentimos / 100,
+        monto_bs_centimos: montoBsCentimos,
+        igtf_bs_centimos: igtfBsCentimos
+      };
+    });
   }
 
   if (!productos || !Array.isArray(productos) || productos.length === 0) {
@@ -76,19 +109,31 @@ exports.registrarVenta = async (req, res) => {
       });
     }
 
-    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+    const impuestoBase = Number(impuesto);
+    const descuentoVenta = Number(descuento);
+    if (!Number.isFinite(impuestoBase) || impuestoBase < 0 || !Number.isFinite(descuentoVenta) || descuentoVenta < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'El impuesto y el descuento deben ser montos válidos no negativos.' });
+    }
+    const totalCalculado = subtotalCalculado + impuestoBase + igtfUsd - descuentoVenta;
     if (pagosValidados) {
-      const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + Math.round(pago.monto * 100), 0);
-      if (montoPagadoCentavos !== Math.round(totalCalculado * 100)) {
+      const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + Math.round(pago.monto_usd * 100), 0);
+      if (Math.abs(montoPagadoCentavos - Math.round(totalCalculado * 100)) > 1) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'La suma de los pagos debe coincidir con el total de la venta.' });
+        return res.status(400).json({ success: false, error: 'La suma de los pagos, incluido el IGTF de la divisa, debe coincidir con el total de la venta.' });
       }
     }
     const metodoPagoVenta = pagosValidados
-      ? pagosValidados.length === 1 ? pagosValidados[0].metodo_pago : 'MIXTO'
+      ? pagosValidados.length === 1
+        ? pagosValidados[0].metodo_pago === 'DIVISA' ? `DIVISA ${pagosValidados[0].moneda}` : pagosValidados[0].metodo_pago
+        : 'MIXTO'
       : metodo_pago;
     const notasVenta = pagosValidados
-      ? [notas, `Pagos (USD): ${pagosValidados.map(pago => `${pago.metodo_pago} ${pago.monto.toFixed(2)}`).join('; ')}.`].filter(Boolean).join('\n')
+      ? [
+        notas,
+        `Pagos: ${pagosValidados.map(pago => `${pago.metodo_pago}${pago.metodo_pago === 'DIVISA' ? ` ${pago.moneda}` : ''} ${pago.monto.toFixed(2)} ${pago.moneda}`).join('; ')}.`,
+        igtfUsd > 0 ? `IGTF 3% sobre pagos en divisa: Bs. ${(pagosValidados.reduce((total, pago) => total + pago.igtf_bs_centimos, 0) / 100).toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null
+      ].filter(Boolean).join('\n')
       : notas || null;
 
     // Insertar Cabecera de Venta
@@ -96,7 +141,7 @@ exports.registrarVenta = async (req, res) => {
       `INSERT INTO ventas (tenant_id, tienda_id, cliente_id, usuario_id, cotizacion_id, metodo_pago, subtotal, impuesto, descuento, total, notas)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
-      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodoPagoVenta, subtotalCalculado, impuesto, descuento, totalCalculado, notasVenta]
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodoPagoVenta, subtotalCalculado, impuestoBase + igtfUsd, descuentoVenta, totalCalculado, notasVenta]
     );
 
     const nuevaVenta = ventaRes.rows[0];
