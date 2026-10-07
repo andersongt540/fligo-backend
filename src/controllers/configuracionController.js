@@ -1,4 +1,82 @@
 const db = require('../config/db');
+const https = require('https');
+
+let tasaBcvCache = null;
+let tasaBcvFetchedAt = 0;
+const BCV_CACHE_DURATION_MS = 60 * 60 * 1000;
+
+function parseTasaBcv(html, id) {
+  const block = html.match(new RegExp(`<div\\b[^>]*\\bid=["']${id}["'][^>]*>([\\s\\S]*?)<\\/div>\\s*<\\/div>\\s*<\\/div>`, 'i'));
+  const value = block?.[1].match(/<strong\b[^>]*>([\s\S]*?)<\/strong>/i)?.[1]
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .trim();
+  if (!value) throw new Error(`El BCV no publicó la tasa ${id === 'dolar' ? 'USD' : 'EUR'}.`);
+  const rate = Number(value.replace(/\./g, '').replace(',', '.'));
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error(`La tasa ${id} publicada por el BCV no es válida.`);
+  return rate;
+}
+
+function downloadPaginaBcv() {
+  return new Promise((resolve, reject) => {
+    const request = https.get('https://www.bcv.org.ve/', {
+      headers: { 'User-Agent': 'Fligo CRM/1.0 (consulta de tipo de cambio)', Accept: 'text/html' }
+    }, response => {
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(new Error(`El BCV respondió HTTP ${response.statusCode}.`));
+        return;
+      }
+      let html = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => {
+        html += chunk;
+        if (html.length > 5_000_000) request.destroy(new Error('La página del BCV superó el tamaño permitido.'));
+      });
+      response.on('end', () => resolve(html));
+      response.on('error', reject);
+    });
+    request.setTimeout(8000, () => request.destroy(new Error('La consulta al BCV excedió el tiempo límite.')));
+    request.on('error', reject);
+  });
+}
+
+exports.obtenerTasasBcv = async (req, res) => {
+  if (tasaBcvCache && Date.now() - tasaBcvFetchedAt < BCV_CACHE_DURATION_MS) {
+    return res.json({ success: true, data: tasaBcvCache });
+  }
+  try {
+    const html = await downloadPaginaBcv();
+    const fechaValor = html.match(/Fecha\s+Valor:\s*([^<]+)/i)?.[1]
+      ?.replace(/<[^>]*>/g, '')
+      .replace(/&nbsp;|&#160;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .trim();
+    const tasas = {
+      usd_ves: parseTasaBcv(html, 'dolar'),
+      eur_ves: parseTasaBcv(html, 'euro'),
+      fecha_valor: fechaValor || null,
+      actualizado_en: new Date().toISOString(),
+      fuente: 'Banco Central de Venezuela'
+    };
+    tasaBcvCache = tasas;
+    tasaBcvFetchedAt = Date.now();
+    return res.json({ success: true, data: tasas });
+  } catch (error) {
+    console.error('Error en obtenerTasasBcv [BCV]:', error);
+    return res.status(502).json({
+      success: false,
+      error: 'No fue posible consultar la tasa de referencia del BCV.',
+      detail: error.message
+    });
+  }
+};
+
+exports.parseTasasBcv = html => ({
+  usd_ves: parseTasaBcv(html, 'dolar'),
+  eur_ves: parseTasaBcv(html, 'euro'),
+  fecha_valor: html.match(/Fecha\s+Valor:\s*([^<]+)/i)?.[1]?.trim() || null
+});
 
 // 1. Obtener o crear configuración global de la empresa
 exports.obtenerConfiguracion = async (req, res) => {

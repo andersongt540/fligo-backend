@@ -6,6 +6,7 @@ const { verificarToken, autorizarRoles } = require('../middlewares/authMiddlewar
 router.use(verificarToken);
 
 // Configuración general de la empresa
+router.get('/tasas-bcv', configuracionController.obtenerTasasBcv);
 router.get('/', configuracionController.obtenerConfiguracion);
 router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
 

@@ -1,0 +1,2048 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  config/
+    db.js
+  controllers/
+    authController.js
+    clienteController.js
+    comunicacionController.js
+    configuracionController.js
+    leadController.js
+    productoController.js
+    reporteController.js
+    ventaController.js
+  middlewares/
+    authMiddleware.js
+  routes/
+    authRoutes.js
+    clienteRoutes.js
+    comunicacionRoutes.js
+    configuracionRoutes.js
+    leadRoutes.js
+    productoRoutes.js
+    reporteRoutes.js
+    ventaRoutes.js
+  app.js
+.gitattributes
+database.sql
+package.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/config/db.js">
+const { Pool } = require('pg');
+require('dotenv').config();
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: isProduction ? { rejectUnauthorized: false } : false
+});
+
+pool.on('connect', () => {
+  console.log('⚡ [Fligo DB] Conexión establecida con PostgreSQL.');
+});
+
+pool.on('error', (err) => {
+  console.error('❌ [Fligo DB Error] Error inesperado en el pool de conexión:', err);
+});
+
+module.exports = {
+  query: (text, params) => pool.query(text, params),
+  pool
+};
+</file>
+
+<file path="src/controllers/authController.js">
+const db = require('../config/db');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+// 1. Registro de Empresa e Inicio en Fligo (Onboarding)
+exports.registerTenant = async (req, res) => {
+  const { nombre_empresa, nombre_usuario, email, password } = req.body;
+
+  if (!nombre_empresa || !nombre_usuario || !email || !password) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Todos los campos son obligatorios para crear tu cuenta en Fligo.' 
+    });
+  }
+
+  const client = await db.pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Verificar si el usuario ya está registrado en Fligo
+    const existingUser = await client.query('SELECT id FROM usuarios WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'El correo electrónico ya está registrado en Fligo.' 
+      });
+    }
+
+    // Crear Empresa / Inquilino en Fligo
+    const tenantRes = await client.query(
+      'INSERT INTO tenants (nombre_empresa) VALUES ($1) RETURNING id, nombre_empresa, plan',
+      [nombre_empresa]
+    );
+    const newTenant = tenantRes.rows[0];
+
+    // Crear la Sucursal / Tienda Principal inicial
+    const tiendaRes = await client.query(
+      'INSERT INTO tiendas (tenant_id, nombre) VALUES ($1, $2) RETURNING id, nombre',
+      [newTenant.id, 'Sucursal Principal']
+    );
+    const newTienda = tiendaRes.rows[0];
+
+    // Cifrar contraseña y crear el usuario OWNER
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    const userRes = await client.query(
+      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol) 
+       VALUES ($1, $2, $3, $4, $5, 'OWNER') RETURNING id, nombre, email, rol`,
+      [newTenant.id, newTienda.id, nombre_usuario, email, passwordHash]
+    );
+
+    await client.query('COMMIT');
+
+    // Generar Token JWT de Fligo
+    const token = jwt.sign(
+      {
+        user_id: userRes.rows[0].id,
+        tenant_id: newTenant.id,
+        tienda_id: newTienda.id,
+        rol: 'OWNER'
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: '¡Bienvenido a Fligo! Empresa y cuenta creadas con éxito.',
+      data: {
+        token,
+        usuario: userRes.rows[0],
+        empresa: newTenant,
+        tienda: newTienda
+      }
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en registerTenant [Fligo]:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error interno del servidor al registrar la cuenta en Fligo.' 
+    });
+  } finally {
+    client.release();
+  }
+};
+
+// 2. Inicio de Sesión
+exports.login = async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Por favor ingresa tu correo y contraseña.' 
+    });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT u.id, u.tenant_id, u.tienda_id, u.nombre, u.email, u.password_hash, u.rol, u.activo,
+              t.nombre_empresa 
+       FROM usuarios u
+       JOIN tenants t ON u.tenant_id = t.id
+       WHERE u.email = $1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ success: false, error: 'Credenciales inválidas en Fligo.' });
+    }
+
+    const usuario = result.rows[0];
+
+    if (!usuario.activo) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'Tu usuario en Fligo se encuentra inactivo. Contacta a tu administrador.' 
+      });
+    }
+
+    const passwordValido = await bcrypt.compare(password, usuario.password_hash);
+    if (!passwordValido) {
+      return res.status(401).json({ success: false, error: 'Credenciales inválidas en Fligo.' });
+    }
+
+    // Generar Token JWT firmado
+    const token = jwt.sign(
+      {
+        user_id: usuario.id,
+        tenant_id: usuario.tenant_id,
+        tienda_id: usuario.tienda_id,
+        rol: usuario.rol
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Inicio de sesión exitoso en Fligo.',
+      data: {
+        token,
+        usuario: {
+          id: usuario.id,
+          nombre: usuario.nombre,
+          email: usuario.email,
+          rol: usuario.rol,
+          tenant_id: usuario.tenant_id,
+          tienda_id: usuario.tienda_id,
+          empresa: usuario.nombre_empresa
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error en login [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error interno del servidor al iniciar sesión.' });
+  }
+};
+
+// 3. Crear Empleado (Solo OWNER o MANAGER del Tenant)
+exports.createEmpleado = async (req, res) => {
+  const { nombre, email, password, rol, tienda_id } = req.body;
+  const tenant_id = req.user.tenant_id; // Garantiza que no se crucen datos entre empresas
+
+  if (!nombre || !email || !password || !rol) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Todos los campos obligatorios deben ser proporcionados.' 
+    });
+  }
+
+  try {
+    const checkUser = await db.query('SELECT id FROM usuarios WHERE email = $1', [email]);
+    if (checkUser.rows.length > 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'El correo electrónico ya está registrado en Fligo.' 
+      });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    const result = await db.query(
+      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, nombre, email, rol, tienda_id, creado_en`,
+      [tenant_id, tienda_id || null, nombre, email, passwordHash, rol]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Empleado registrado exitosamente en tu equipo de Fligo.',
+      data: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Error en createEmpleado [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el empleado.' });
+  }
+};
+
+// 4. Obtener Perfil del Usuario Autenticado
+exports.getProfile = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT u.id, u.nombre, u.email, u.rol, u.tenant_id, u.tienda_id, t.nombre_empresa, s.nombre as nombre_tienda
+       FROM usuarios u
+       JOIN tenants t ON u.tenant_id = t.id
+       LEFT JOIN tiendas s ON u.tienda_id = s.id
+       WHERE u.id = $1`,
+      [req.user.user_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Usuario de Fligo no encontrado.' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error en getProfile [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener datos del perfil.' });
+  }
+};
+</file>
+
+<file path="src/controllers/clienteController.js">
+const db = require('../config/db');
+
+// 1. Crear un nuevo cliente en Fligo
+exports.crearCliente = async (req, res) => {
+  const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
+  const tenant_id = req.user.tenant_id; // Garantiza aislamiento Multi-Tenant
+  
+  // Si no se especifica tienda_id, asigna la tienda del usuario conectado
+  const tiendaAsignada = tienda_id || req.user.tienda_id;
+
+  if (!nombre) {
+    return res.status(400).json({ success: false, error: 'El nombre del cliente es obligatorio.' });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO clientes (tenant_id, tienda_id, nombre, documento_identidad, email, telefono, direccion, categoria, notas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [tenant_id, tiendaAsignada, nombre, documento_identidad || null, email || null, telefono || null, direccion || null, categoria || 'General', notas || null]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Cliente registrado con éxito en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en crearCliente [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el cliente.' });
+  }
+};
+
+// 2. Obtener lista de clientes con filtros y paginación
+exports.obtenerClientes = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { busqueda, categoria, tienda_id, page = 1, limit = 20 } = req.query;
+
+  const offset = (page - 1) * limit;
+  let params = [tenant_id];
+  let conditions = ['tenant_id = $1', 'activo = TRUE'];
+
+  // Filtro por tienda si el usuario es un empleado con tienda asignada
+  if (req.user.rol === 'EMPLOYEE' && req.user.tienda_id) {
+    params.push(req.user.tienda_id);
+    conditions.push(`tienda_id = $${params.length}`);
+  } else if (tienda_id) {
+    params.push(tienda_id);
+    conditions.push(`tienda_id = $${params.length}`);
+  }
+
+  // Filtro por categoría
+  if (categoria) {
+    params.push(categoria);
+    conditions.push(`categoria = $${params.length}`);
+  }
+
+  // Búsqueda por Nombre, Email o Documento de Identidad
+  if (busqueda) {
+    params.push(`%${busqueda}%`);
+    conditions.push(`(nombre ILIKE $${params.length} OR email ILIKE $${params.length} OR documento_identidad ILIKE $${params.length})`);
+  }
+
+  const whereClause = conditions.join(' AND ');
+
+  try {
+    // Consulta de los clientes
+    const clientesQuery = `
+      SELECT c.*, t.nombre as nombre_tienda 
+      FROM clientes c
+      LEFT JOIN tiendas t ON c.tienda_id = t.id
+      WHERE ${whereClause}
+      ORDER BY c.creado_en DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+    
+    // Consulta de total para la paginación
+    const totalQuery = `SELECT COUNT(*) FROM clientes WHERE ${whereClause}`;
+
+    const [clientesRes, totalRes] = await Promise.all([
+      db.query(clientesQuery, [...params, limit, offset]),
+      db.query(totalQuery, params)
+    ]);
+
+    const total = parseInt(totalRes.rows[0].count);
+
+    res.json({
+      success: true,
+      data: clientesRes.rows,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error en obtenerClientes [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener la lista de clientes.' });
+  }
+};
+
+// 3. Obtener detalle de un cliente por ID
+exports.obtenerClientePorId = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `SELECT c.*, t.nombre as nombre_tienda 
+       FROM clientes c
+       LEFT JOIN tiendas t ON c.tienda_id = t.id
+       WHERE c.id = $1 AND c.tenant_id = $2 AND c.activo = TRUE`,
+      [id, tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado en Fligo.' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error en obtenerClientePorId [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener los detalles del cliente.' });
+  }
+};
+
+// 4. Actualizar cliente
+exports.actualizarCliente = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+  const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
+
+  try {
+    const checkCliente = await db.query(
+      'SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2 AND activo = TRUE',
+      [id, tenant_id]
+    );
+
+    if (checkCliente.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado o sin autorización.' });
+    }
+
+    const result = await db.query(
+      `UPDATE clientes 
+       SET nombre = COALESCE($1, nombre),
+           documento_identidad = COALESCE($2, documento_identidad),
+           email = COALESCE($3, email),
+           telefono = COALESCE($4, telefono),
+           direccion = COALESCE($5, direccion),
+           categoria = COALESCE($6, categoria),
+           notas = COALESCE($7, notas),
+           tienda_id = COALESCE($8, tienda_id),
+           actualizado_en = CURRENT_TIMESTAMP
+       WHERE id = $9 AND tenant_id = $10
+       RETURNING *`,
+      [nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id, id, tenant_id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Cliente actualizado correctamente en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en actualizarCliente [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al actualizar el cliente.' });
+  }
+};
+
+// 5. Eliminar cliente (Eliminación lógica)
+exports.eliminarCliente = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `UPDATE clientes 
+       SET activo = FALSE, actualizado_en = CURRENT_TIMESTAMP 
+       WHERE id = $1 AND tenant_id = $2 
+       RETURNING id`,
+      [id, tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado o sin autorización.' });
+    }
+
+    res.json({ success: true, message: 'Cliente eliminado correctamente de Fligo.' });
+  } catch (error) {
+    console.error('Error en eliminarCliente [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al eliminar el cliente.' });
+  }
+};
+</file>
+
+<file path="src/controllers/comunicacionController.js">
+const db = require('../config/db');
+
+// 1. Registrar una interacción/comunicación en la bitácora
+exports.registrarInteraccion = async (req, res) => {
+  const { cliente_id, lead_id, canal, mensaje, metadata } = req.body;
+  const tenant_id = req.user.tenant_id;
+
+  if (!canal || !mensaje) {
+    return res.status(400).json({ success: false, error: 'El canal y el mensaje son obligatorios.' });
+  }
+
+  if (!cliente_id && !lead_id) {
+    return res.status(400).json({ success: false, error: 'Debes asociar la interacción a un cliente o prospecto.' });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO interacciones (tenant_id, cliente_id, lead_id, usuario_id, canal, mensaje, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [tenant_id, cliente_id || null, lead_id || null, req.user.user_id, canal, mensaje, metadata ? JSON.stringify(metadata) : null]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Interacción registrada en la bitácora de Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en registrarInteraccion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al guardar la comunicación.' });
+  }
+};
+
+// 2. Obtener la bitácora de interacciones de un cliente o lead
+exports.obtenerInteracciones = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { cliente_id, lead_id } = req.query;
+
+  if (!cliente_id && !lead_id) {
+    return res.status(400).json({ success: false, error: 'Indica cliente_id o lead_id para consultar la bitácora.' });
+  }
+
+  try {
+    let query = `
+      SELECT i.*, u.nombre as nombre_usuario
+      FROM interacciones i
+      LEFT JOIN usuarios u ON i.usuario_id = u.id
+      WHERE i.tenant_id = $1
+    `;
+    let params = [tenant_id];
+
+    if (cliente_id) {
+      params.push(cliente_id);
+      query += ` AND i.cliente_id = $${params.length}`;
+    } else if (lead_id) {
+      params.push(lead_id);
+      query += ` AND i.lead_id = $${params.length}`;
+    }
+
+    query += ' ORDER BY i.creado_en DESC';
+
+    const result = await db.query(query, params);
+
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Error en obtenerInteracciones [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al consultar el historial de comunicación.' });
+  }
+};
+</file>
+
+<file path="src/controllers/configuracionController.js">
+const db = require('../config/db');
+
+// 1. Obtener o crear configuración global de la empresa
+exports.obtenerConfiguracion = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    let result = await db.query(
+      `SELECT c.*, t.nombre_empresa, t.plan 
+       FROM configuracion_empresa c
+       RIGHT JOIN tenants t ON c.tenant_id = t.id
+       WHERE t.id = $1`,
+      [tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Empresa no encontrada.' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error en obtenerConfiguracion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener la configuración de la empresa.' });
+  }
+};
+
+// 2. Actualizar configuración de la empresa (Moneda, Tasa, Impuestos)
+exports.actualizarConfiguracion = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal } = req.body;
+
+  try {
+    const result = await db.query(
+      `INSERT INTO configuracion_empresa (tenant_id, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         logo_url = COALESCE(EXCLUDED.logo_url, configuracion_empresa.logo_url),
+         moneda_principal = COALESCE(EXCLUDED.moneda_principal, configuracion_empresa.moneda_principal),
+         simbolo_moneda = COALESCE(EXCLUDED.simbolo_moneda, configuracion_empresa.simbolo_moneda),
+         impuesto_defecto = COALESCE(EXCLUDED.impuesto_defecto, configuracion_empresa.impuesto_defecto),
+         tasa_cambio = COALESCE(EXCLUDED.tasa_cambio, configuracion_empresa.tasa_cambio),
+         direccion_fiscal = COALESCE(EXCLUDED.direccion_fiscal, configuracion_empresa.direccion_fiscal),
+         documento_fiscal = COALESCE(EXCLUDED.documento_fiscal, configuracion_empresa.documento_fiscal),
+         actualizado_en = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [tenant_id, logo_url || null, moneda_principal || 'USD', simbolo_moneda || '$', impuesto_defecto || 16.00, tasa_cambio || 1.0000, direccion_fiscal || null, documento_fiscal || null]
+    );
+
+    res.json({
+      success: true,
+      message: 'Configuración de la empresa actualizada con éxito en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en actualizarConfiguracion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al guardar la configuración.' });
+  }
+};
+
+// 3. Crear nueva Sucursal / Tienda en la Empresa
+exports.crearTienda = async (req, res) => {
+  const { nombre, direccion, telefono } = req.body;
+  const tenant_id = req.user.tenant_id;
+
+  if (!nombre) {
+    return res.status(400).json({ success: false, error: 'El nombre de la tienda es obligatorio.' });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO tiendas (tenant_id, nombre, direccion, telefono)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [tenant_id, nombre, direccion || null, telefono || null]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Nueva tienda registrada en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en crearTienda [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al crear la tienda.' });
+  }
+};
+
+// 4. Listar todas las tiendas de la empresa
+exports.obtenerTiendas = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `SELECT * FROM tiendas WHERE tenant_id = $1 AND activa = TRUE ORDER BY creado_en ASC`,
+      [tenant_id]
+    );
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error en obtenerTiendas [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener la lista de tiendas.' });
+  }
+};
+</file>
+
+<file path="src/controllers/leadController.js">
+const db = require('../config/db');
+
+// 1. Crear un nuevo Prospecto (Lead)
+exports.crearLead = async (req, res) => {
+  const { nombre, email, telefono, empresa_origen, valor_estimado, tienda_id, vendedor_id, cliente_id } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const targetTiendaId = tienda_id || req.user.tienda_id;
+  const targetVendedorId = vendedor_id || req.user.user_id;
+
+  if (!nombre) {
+    return res.status(400).json({ success: false, error: 'El nombre del prospecto es obligatorio.' });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO leads (tenant_id, tienda_id, vendedor_id, cliente_id, nombre, email, telefono, empresa_origen, valor_estimado)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [tenant_id, targetTiendaId || null, targetVendedorId || null, cliente_id || null, nombre, email || null, telefono || null, empresa_origen || null, valor_estimado || 0.00]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Prospecto creado exitosamente en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en crearLead [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el prospecto.' });
+  }
+};
+
+// 2. Obtener Pipeline / Embudo de Ventas (Agrupado por etapas o lista)
+exports.obtenerPipeline = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { tienda_id, vendedor_id, etapa } = req.query;
+
+  let params = [tenant_id];
+  let conditions = ['l.tenant_id = $1'];
+
+  if (req.user.rol === 'EMPLOYEE') {
+    params.push(req.user.user_id);
+    conditions.push(`l.vendedor_id = $${params.length}`);
+  } else {
+    if (tienda_id) {
+      params.push(tienda_id);
+      conditions.push(`l.tienda_id = $${params.length}`);
+    }
+    if (vendedor_id) {
+      params.push(vendedor_id);
+      conditions.push(`l.vendedor_id = $${params.length}`);
+    }
+  }
+
+  if (etapa) {
+    params.push(etapa);
+    conditions.push(`l.etapa = $${params.length}`);
+  }
+
+  try {
+    const query = `
+      SELECT l.*, 
+             u.nombre as nombre_vendedor,
+             t.nombre as nombre_tienda
+      FROM leads l
+      LEFT JOIN usuarios u ON l.vendedor_id = u.id
+      LEFT JOIN tiendas t ON l.tienda_id = t.id
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY l.actualizado_en DESC
+    `;
+
+    const result = await db.query(query, params);
+
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Error en obtenerPipeline [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al consultar el embudo de ventas.' });
+  }
+};
+
+// 3. Cambiar etapa del Lead (Mover en tablero Kanban)
+exports.actualizarEtapaLead = async (req, res) => {
+  const { id } = req.params;
+  const { etapa, motivo_cierre } = req.body;
+  const tenant_id = req.user.tenant_id;
+
+  const etapasValidas = ['NUEVO', 'CONTACTADO', 'COTIZADO', 'NEGOCIACION', 'GANADO', 'PERDIDO'];
+  if (!etapa || !etapasValidas.includes(etapa)) {
+    return res.status(400).json({ success: false, error: 'Etapa del embudo no válida.' });
+  }
+
+  try {
+    const result = await db.query(
+      `UPDATE leads 
+       SET etapa = $1, motivo_cierre = COALESCE($2, motivo_cierre), actualizado_en = CURRENT_TIMESTAMP
+       WHERE id = $3 AND tenant_id = $4
+       RETURNING *`,
+      [etapa, motivo_cierre || null, id, tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Prospecto no encontrado o sin permisos.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Etapa del prospecto actualizada en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en actualizarEtapaLead [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al actualizar el prospecto.' });
+  }
+};
+
+// 4. Crear tarea de seguimiento para un Lead
+exports.crearTareaLead = async (req, res) => {
+  const { lead_id, titulo, descripcion, tipo, fecha_vencimiento } = req.body;
+  const tenant_id = req.user.tenant_id;
+
+  if (!lead_id || !titulo || !fecha_vencimiento) {
+    return res.status(400).json({ success: false, error: 'Lead ID, título y fecha de vencimiento son requeridos.' });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO tareas_lead (tenant_id, lead_id, usuario_id, titulo, descripcion, tipo, fecha_vencimiento)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [tenant_id, lead_id, req.user.user_id, titulo, descripcion || null, tipo || 'LLAMADA', fecha_vencimiento]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Tarea asignada correctamente.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en crearTareaLead [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar la tarea.' });
+  }
+};
+</file>
+
+<file path="src/controllers/productoController.js">
+const db = require('../config/db');
+
+// 1. Crear producto e inicializar inventario en las tiendas
+exports.crearProducto = async (req, res) => {
+  const { codigo_sku, codigo_barras, nombre, descripcion, categoria, precio_base, costo, stock_inicial = 0, stock_minimo = 5, tienda_id } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const tiendaAsignada = tienda_id || req.user.tienda_id;
+
+  if (!codigo_sku || !nombre || precio_base === undefined) {
+    return res.status(400).json({ success: false, error: 'SKU, nombre y precio base son obligatorios.' });
+  }
+
+  const client = await db.pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Insertar Producto
+    const productoRes = await client.query(
+      `INSERT INTO productos (tenant_id, codigo_sku, codigo_barras, nombre, descripcion, categoria, precio_base, costo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [tenant_id, codigo_sku, codigo_barras || null, nombre, descripcion || null, categoria || 'General', precio_base, costo || 0.00]
+    );
+
+    const nuevoProducto = productoRes.rows[0];
+
+    // Inicializar inventario en la tienda correspondiente si existe una tienda asignada
+    if (tiendaAsignada) {
+      await client.query(
+        `INSERT INTO inventario_tienda (tenant_id, tienda_id, producto_id, stock_actual, stock_minimo)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [tenant_id, tiendaAsignada, nuevoProducto.id, stock_inicial, stock_minimo]
+      );
+
+      // Registrar movimiento de stock inicial si fue mayor a 0
+      if (stock_inicial > 0) {
+        await client.query(
+          `INSERT INTO movimientos_inventario (tenant_id, tienda_id, producto_id, usuario_id, tipo_movimiento, cantidad, stock_resultante, motivo)
+           VALUES ($1, $2, $3, $4, 'ENTRADA', $5, $5, 'Stock inicial de creación')`,
+          [tenant_id, tiendaAsignada, nuevoProducto.id, req.user.user_id, stock_inicial]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      success: true,
+      message: 'Producto creado exitosamente en Fligo.',
+      data: nuevoProducto
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') { // Violación de restricción UNIQUE (SKU duplicado)
+      return res.status(400).json({ success: false, error: 'El código SKU ya existe en la empresa.' });
+    }
+    console.error('Error en crearProducto [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el producto.' });
+  } finally {
+    client.release();
+  }
+};
+
+// 2. Obtener productos con stock por tienda y búsqueda rápida (Móvil/POS)
+exports.obtenerProductos = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { busqueda, categoria, tienda_id, bajo_stock, page = 1, limit = 20 } = req.query;
+
+  // Empleados consultan stock de su tienda asignada por defecto
+  const targetTiendaId = (req.user.rol === 'EMPLOYEE' && req.user.tienda_id) 
+    ? req.user.tienda_id 
+    : (tienda_id || req.user.tienda_id);
+
+  const offset = (page - 1) * limit;
+  let params = [tenant_id];
+  let conditions = ['p.tenant_id = $1', 'p.activo = TRUE'];
+
+  if (categoria) {
+    params.push(categoria);
+    conditions.push(`p.categoria = $${params.length}`);
+  }
+
+  if (busqueda) {
+    params.push(`%${busqueda}%`);
+    conditions.push(`(p.nombre ILIKE $${params.length} OR p.codigo_sku ILIKE $${params.length} OR p.codigo_barras ILIKE $${params.length})`);
+  }
+
+  if (bajo_stock === 'true' && targetTiendaId) {
+    conditions.push(`COALESCE(i.stock_actual, 0) <= COALESCE(i.stock_minimo, 5)`);
+  }
+
+  const whereClause = conditions.join(' AND ');
+
+  try {
+    let query = `
+      SELECT p.*, 
+             COALESCE(i.stock_actual, 0) as stock_actual,
+             COALESCE(i.stock_minimo, 5) as stock_minimo,
+             t.nombre as nombre_tienda
+      FROM productos p
+      LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $${params.length + 1}
+      LEFT JOIN tiendas t ON i.tienda_id = t.id
+      WHERE ${whereClause}
+      ORDER BY p.nombre ASC
+      LIMIT $${params.length + 2} OFFSET $${params.length + 3}
+    `;
+
+    const queryParams = [...params, targetTiendaId || null, limit, offset];
+    const result = await db.query(query, queryParams);
+
+    res.json({
+      success: true,
+      data: result.rows,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+
+  } catch (error) {
+    console.error('Error en obtenerProductos [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al consultar productos.' });
+  }
+};
+
+// 3. Ajustar stock manualmente (Entrada / Salida / Corrección)
+exports.ajustarInventario = async (req, res) => {
+  const { producto_id, cantidad, tipo_movimiento, motivo, tienda_id } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const targetTiendaId = tienda_id || req.user.tienda_id;
+
+  if (!producto_id || cantidad === undefined || !tipo_movimiento || !targetTiendaId) {
+    return res.status(400).json({ success: false, error: 'Faltan parámetros obligatorios para el ajuste.' });
+  }
+
+  if (!['ENTRADA', 'SALIDA', 'AJUSTE'].includes(tipo_movimiento)) {
+    return res.status(400).json({ success: false, error: 'Tipo de movimiento inválido.' });
+  }
+
+  const client = await db.pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Obtener inventario actual o crearlo si no existe el registro en esa tienda
+    let invRes = await client.query(
+      `SELECT * FROM inventario_tienda WHERE tenant_id = $1 AND tienda_id = $2 AND producto_id = $3 FOR UPDATE`,
+      [tenant_id, targetTiendaId, producto_id]
+    );
+
+    let stockActual = 0;
+    if (invRes.rows.length === 0) {
+      const newInv = await client.query(
+        `INSERT INTO inventario_tienda (tenant_id, tienda_id, producto_id, stock_actual)
+         VALUES ($1, $2, $3, 0) RETURNING *`,
+        [tenant_id, targetTiendaId, producto_id]
+      );
+      stockActual = 0;
+    } else {
+      stockActual = invRes.rows[0].stock_actual;
+    }
+
+    // Calcular nuevo stock
+    let nuevoStock = stockActual;
+    if (tipo_movimiento === 'ENTRADA') nuevoStock += parseInt(cantidad);
+    else if (tipo_movimiento === 'SALIDA') nuevoStock -= parseInt(cantidad);
+    else if (tipo_movimiento === 'AJUSTE') nuevoStock = parseInt(cantidad);
+
+    if (nuevoStock < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'El ajuste genera un stock negativo no permitido.' });
+    }
+
+    // Actualizar registro de inventario
+    await client.query(
+      `UPDATE inventario_tienda 
+       SET stock_actual = $1, actualizado_en = CURRENT_TIMESTAMP
+       WHERE tenant_id = $2 AND tienda_id = $3 AND producto_id = $4`,
+      [nuevoStock, tenant_id, targetTiendaId, producto_id]
+    );
+
+    // Auditoría de movimiento
+    await client.query(
+      `INSERT INTO movimientos_inventario (tenant_id, tienda_id, producto_id, usuario_id, tipo_movimiento, cantidad, stock_resultante, motivo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [tenant_id, targetTiendaId, producto_id, req.user.user_id, tipo_movimiento, cantidad, nuevoStock, motivo || 'Ajuste manual']
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      message: 'Inventario actualizado correctamente en Fligo.',
+      data: { producto_id, tienda_id: targetTiendaId, stock_anterior: stockActual, stock_nuevo: nuevoStock }
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en ajustarInventario [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error interno al actualizar el inventario.' });
+  } finally {
+    client.release();
+  }
+};
+</file>
+
+<file path="src/controllers/reporteController.js">
+const db = require('../config/db');
+
+// 1. Dashboard de Métricas Generales (Móvil / Web)
+exports.obtenerDashboardSummary = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { tienda_id, fecha_inicio, fecha_fin } = req.query;
+
+  // Filtrado por tienda si el usuario es un empleado con tienda fija
+  const targetTiendaId = (req.user.rol === 'EMPLOYEE' && req.user.tienda_id)
+    ? req.user.tienda_id
+    : (tienda_id || req.user.tienda_id);
+
+  let params = [tenant_id];
+  let conditions = ["v.tenant_id = $1", "v.estado = 'COMPLETADA'"];
+
+  if (targetTiendaId) {
+    params.push(targetTiendaId);
+    conditions.push(`v.tienda_id = $${params.length}`);
+  }
+
+  if (fecha_inicio) {
+    params.push(fecha_inicio);
+    conditions.push(`v.creado_en >= $${params.length}`);
+  }
+
+  if (fecha_fin) {
+    params.push(fecha_fin);
+    conditions.push(`v.creado_en <= $${params.length}`);
+  }
+
+  const whereClause = conditions.join(' AND ');
+
+  try {
+    // Consulta 1: Totales de Ventas, Ticket Promedio y Cantidad de Transacciones
+    const ventasQuery = `
+      SELECT 
+        COALESCE(SUM(v.total), 0) as total_ventas,
+        COALESCE(COUNT(v.id), 0) as cantidad_ventas,
+        COALESCE(AVG(v.total), 0) as ticket_promedio
+      FROM ventas v
+      WHERE ${whereClause}
+    `;
+
+    // Consulta 2: Top 5 Productos más Vendidos
+    const topProductosQuery = `
+      SELECT 
+        p.id,
+        p.nombre,
+        p.codigo_sku,
+        SUM(dv.cantidad) as total_unidades_vendidas,
+        SUM(dv.subtotal) as total_recaudado
+      FROM detalle_venta dv
+      JOIN ventas v ON dv.venta_id = v.id
+      JOIN productos p ON dv.producto_id = p.id
+      WHERE ${whereClause}
+      GROUP BY p.id, p.nombre, p.codigo_sku
+      ORDER BY total_unidades_vendidas DESC
+      LIMIT 5
+    `;
+
+    // Consulta 3: Total de Clientes Activos de la Empresa
+    const totalClientesQuery = `
+      SELECT COUNT(id) as total_clientes 
+      FROM clientes 
+      WHERE tenant_id = $1 AND activo = TRUE
+    `;
+
+    const [ventasRes, topProdRes, clientesRes] = await Promise.all([
+      db.query(ventasQuery, params),
+      db.query(topProductosQuery, params),
+      db.query(totalClientesQuery, [tenant_id])
+    ]);
+
+    const kpis = ventasRes.rows[0];
+
+    res.json({
+      success: true,
+      data: {
+        kpis: {
+          total_ventas: parseFloat(kpis.total_ventas),
+          cantidad_ventas: parseInt(kpis.cantidad_ventas),
+          ticket_promedio: parseFloat(kpis.ticket_promedio),
+          total_clientes: parseInt(clientesRes.rows[0].total_clientes)
+        },
+        top_productos: topProdRes.rows
+      }
+    });
+
+  } catch (error) {
+    console.error('Error en obtenerDashboardSummary [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al generar métricas del dashboard.' });
+  }
+};
+
+// 2. Comparativo de Ventas por Tienda (Solo OWNER / MANAGER)
+exports.obtenerVentasPorTienda = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { fecha_inicio, fecha_fin } = req.query;
+
+  let params = [tenant_id];
+  let conditions = ["t.tenant_id = $1", "t.activa = TRUE"];
+
+  let fechaWhere = "v.estado = 'COMPLETADA'";
+  if (fecha_inicio) {
+    params.push(fecha_inicio);
+    fechaWhere += ` AND v.creado_en >= $${params.length}`;
+  }
+  if (fecha_fin) {
+    params.push(fecha_fin);
+    fechaWhere += ` AND v.creado_en <= $${params.length}`;
+  }
+
+  try {
+    const query = `
+      SELECT 
+        t.id as tienda_id,
+        t.nombre as nombre_tienda,
+        COALESCE(SUM(v.total), 0) as total_ventas,
+        COALESCE(COUNT(v.id), 0) as cantidad_ventas
+      FROM tiendas t
+      LEFT JOIN ventas v ON t.id = v.tienda_id AND ${fechaWhere}
+      WHERE ${conditions.join(' AND ')}
+      GROUP BY t.id, t.nombre
+      ORDER BY total_ventas DESC
+    `;
+
+    const result = await db.query(query, params);
+
+    res.json({
+      success: true,
+      data: result.rows
+    });
+
+  } catch (error) {
+    console.error('Error en obtenerVentasPorTienda [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al generar reporte por tiendas.' });
+  }
+};
+
+// 3. Ranking y Desempeño de Vendedores
+exports.obtenerRankingVendedores = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { tienda_id, fecha_inicio, fecha_fin } = req.query;
+
+  let params = [tenant_id];
+  let conditions = ["v.tenant_id = $1", "v.estado = 'COMPLETADA'"];
+
+  if (tienda_id) {
+    params.push(tienda_id);
+    conditions.push(`v.tienda_id = $${params.length}`);
+  }
+
+  if (fecha_inicio) {
+    params.push(fecha_inicio);
+    conditions.push(`v.creado_en >= $${params.length}`);
+  }
+
+  if (fecha_fin) {
+    params.push(fecha_fin);
+    conditions.push(`v.creado_en <= $${params.length}`);
+  }
+
+  try {
+    const query = `
+      SELECT 
+        u.id as usuario_id,
+        u.nombre as nombre_vendedor,
+        t.nombre as nombre_tienda,
+        COALESCE(SUM(v.total), 0) as total_vendido,
+        COALESCE(COUNT(v.id), 0) as cantidad_ventas
+      FROM usuarios u
+      JOIN ventas v ON u.id = v.usuario_id
+      LEFT JOIN tiendas t ON v.tienda_id = t.id
+      WHERE ${conditions.join(' AND ')}
+      GROUP BY u.id, u.nombre, t.nombre
+      ORDER BY total_vendido DESC
+    `;
+
+    const result = await db.query(query, params);
+
+    res.json({
+      success: true,
+      data: result.rows
+    });
+
+  } catch (error) {
+    console.error('Error en obtenerRankingVendedores [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al generar ranking de vendedores.' });
+  }
+};
+</file>
+
+<file path="src/controllers/ventaController.js">
+const db = require('../config/db');
+
+// 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
+exports.registrarVenta = async (req, res) => {
+  const { cliente_id, productos, metodo_pago, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const targetTiendaId = tienda_id || req.user.tienda_id;
+
+  if (!productos || !Array.isArray(productos) || productos.length === 0) {
+    return res.status(400).json({ success: false, error: 'La venta debe contener al menos un producto.' });
+  }
+
+  if (!metodo_pago) {
+    return res.status(400).json({ success: false, error: 'Debes especificar el método de pago.' });
+  }
+
+  if (!targetTiendaId) {
+    return res.status(400).json({ success: false, error: 'Debes especificar la tienda donde se realiza la venta.' });
+  }
+
+  const client = await db.pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    let subtotalCalculado = 0;
+    const itemsProcesados = [];
+
+    // Validar productos y verificar stock disponible en la tienda
+    for (const item of productos) {
+      const prodRes = await client.query(
+        `SELECT p.id, p.precio_base, COALESCE(i.stock_actual, 0) as stock_actual
+         FROM productos p
+         LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $1
+         WHERE p.id = $2 AND p.tenant_id = $3 AND p.activo = TRUE
+         FOR UPDATE`,
+        [targetTiendaId, item.producto_id, tenant_id]
+      );
+
+      if (prodRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: `Producto ID ${item.producto_id} no encontrado en la empresa.` });
+      }
+
+      const prod = prodRes.rows[0];
+
+      if (prod.stock_actual < item.cantidad) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          success: false, 
+          error: `Stock insuficiente para el producto ID ${item.producto_id}. Disponible: ${prod.stock_actual}, Solicitado: ${item.cantidad}` 
+        });
+      }
+
+      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
+      const subtotalItem = precioUnitario * item.cantidad;
+      subtotalCalculado += subtotalItem;
+
+      itemsProcesados.push({
+        producto_id: prod.id,
+        cantidad: item.cantidad,
+        precio_unitario: precioUnitario,
+        subtotal: subtotalItem,
+        stock_actual: prod.stock_actual
+      });
+    }
+
+    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+
+    // Insertar Cabecera de Venta
+    const ventaRes = await client.query(
+      `INSERT INTO ventas (tenant_id, tienda_id, cliente_id, usuario_id, cotizacion_id, metodo_pago, subtotal, impuesto, descuento, total, notas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodo_pago, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
+    );
+
+    const nuevaVenta = ventaRes.rows[0];
+
+    // Insertar Detalle y Descontar Inventario
+    for (const item of itemsProcesados) {
+      await client.query(
+        `INSERT INTO detalle_venta (venta_id, producto_id, cantidad, precio_unitario, subtotal)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [nuevaVenta.id, item.producto_id, item.cantidad, item.precio_unitario, item.subtotal]
+      );
+
+      const nuevoStock = item.stock_actual - item.cantidad;
+
+      // Actualizar Stock de la Tienda
+      await client.query(
+        `UPDATE inventario_tienda
+         SET stock_actual = $1, actualizado_en = CURRENT_TIMESTAMP
+         WHERE tenant_id = $2 AND tienda_id = $3 AND producto_id = $4`,
+        [nuevoStock, tenant_id, targetTiendaId, item.producto_id]
+      );
+
+      // Registrar movimiento de auditoría
+      await client.query(
+        `INSERT INTO movimientos_inventario (tenant_id, tienda_id, producto_id, usuario_id, tipo_movimiento, cantidad, stock_resultante, motivo)
+         VALUES ($1, $2, $3, $4, 'VENTA', $5, $6, $7)`,
+        [tenant_id, targetTiendaId, item.producto_id, req.user.user_id, item.cantidad, nuevoStock, `Venta registrada ID: ${nuevaVenta.id}`]
+      );
+    }
+
+    // Si provenía de una cotización, marcarla como CONVERTIDA
+    if (cotizacion_id) {
+      await client.query(
+        `UPDATE cotizaciones SET estado = 'CONVERTIDA' WHERE id = $1 AND tenant_id = $2`,
+        [cotizacion_id, tenant_id]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      success: true,
+      message: 'Venta registrada con éxito en Fligo.',
+      data: nuevaVenta
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en registrarVenta [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al procesar la venta.' });
+  } finally {
+    client.release();
+  }
+};
+
+// 2. Crear Cotización / Presupuesto
+exports.crearCotizacion = async (req, res) => {
+  const { cliente_id, productos, descuento = 0, impuesto = 0, notas, tienda_id } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const targetTiendaId = tienda_id || req.user.tienda_id;
+
+  if (!productos || !Array.isArray(productos) || productos.length === 0) {
+    return res.status(400).json({ success: false, error: 'La cotización debe incluir al menos un producto.' });
+  }
+
+  const client = await db.pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    let subtotalCalculado = 0;
+    const itemsProcesados = [];
+
+    for (const item of productos) {
+      const prodRes = await client.query(
+        `SELECT id, precio_base FROM productos WHERE id = $1 AND tenant_id = $2 AND activo = TRUE`,
+        [item.producto_id, tenant_id]
+      );
+
+      if (prodRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: `Producto ID ${item.producto_id} no encontrado.` });
+      }
+
+      const prod = prodRes.rows[0];
+      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
+      const subtotalItem = precioUnitario * item.cantidad;
+      subtotalCalculado += subtotalItem;
+
+      itemsProcesados.push({
+        producto_id: prod.id,
+        cantidad: item.cantidad,
+        precio_unitario: precioUnitario,
+        subtotal: subtotalItem
+      });
+    }
+
+    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+
+    const cotRes = await client.query(
+      `INSERT INTO cotizaciones (tenant_id, tienda_id, cliente_id, usuario_id, subtotal, impuesto, descuento, total, notas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
+    );
+
+    const nuevaCotizacion = cotRes.rows[0];
+
+    for (const item of itemsProcesados) {
+      await client.query(
+        `INSERT INTO detalle_cotizacion (cotizacion_id, producto_id, cantidad, precio_unitario, subtotal)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [nuevaCotizacion.id, item.producto_id, item.cantidad, item.precio_unitario, item.subtotal]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      success: true,
+      message: 'Cotización creada exitosamente en Fligo.',
+      data: nuevaCotizacion
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en crearCotizacion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al generar la cotización.' });
+  } finally {
+    client.release();
+  }
+};
+
+// 3. Listar Ventas por Tienda con Filtros
+exports.obtenerVentas = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { tienda_id, fecha_inicio, fecha_fin, page = 1, limit = 20 } = req.query;
+
+  const targetTiendaId = (req.user.rol === 'EMPLOYEE' && req.user.tienda_id)
+    ? req.user.tienda_id
+    : (tienda_id || req.user.tienda_id);
+
+  const offset = (page - 1) * limit;
+  let params = [tenant_id];
+  let conditions = ['v.tenant_id = $1'];
+
+  if (targetTiendaId) {
+    params.push(targetTiendaId);
+    conditions.push(`v.tienda_id = $${params.length}`);
+  }
+
+  if (fecha_inicio) {
+    params.push(fecha_inicio);
+    conditions.push(`v.creado_en >= $${params.length}`);
+  }
+
+  if (fecha_fin) {
+    params.push(fecha_fin);
+    conditions.push(`v.creado_en <= $${params.length}`);
+  }
+
+  const whereClause = conditions.join(' AND ');
+
+  try {
+    const query = `
+      SELECT v.*, 
+             c.nombre as nombre_cliente, 
+             u.nombre as nombre_vendedor,
+             t.nombre as nombre_tienda
+      FROM ventas v
+      LEFT JOIN clientes c ON v.cliente_id = c.id
+      LEFT JOIN usuarios u ON v.usuario_id = u.id
+      LEFT JOIN tiendas t ON v.tienda_id = t.id
+      WHERE ${whereClause}
+      ORDER BY v.creado_en DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+
+    const result = await db.query(query, [...params, limit, offset]);
+
+    res.json({
+      success: true,
+      data: result.rows,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+
+  } catch (error) {
+    console.error('Error en obtenerVentas [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al consultar el historial de ventas.' });
+  }
+};
+</file>
+
+<file path="src/middlewares/authMiddleware.js">
+const jwt = require('jsonwebtoken');
+
+const verificarToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Formato: Bearer <TOKEN>
+
+  if (!token) {
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Acceso denegado a Fligo. Token de autenticación no proporcionado.' 
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // Inyecta { user_id, tenant_id, tienda_id, rol }
+    next();
+  } catch (err) {
+    return res.status(403).json({ 
+      success: false, 
+      error: 'Sesión en Fligo inválida o expirada. Inicie sesión nuevamente.' 
+    });
+  }
+};
+
+const autorizarRoles = (...rolesPermitidos) => {
+  return (req, res, next) => {
+    if (!req.user || !rolesPermitidos.includes(req.user.rol)) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'No tienes permisos suficientes en Fligo para realizar esta acción.' 
+      });
+    }
+    next();
+  };
+};
+
+module.exports = {
+  verificarToken,
+  autorizarRoles
+};
+</file>
+
+<file path="src/routes/authRoutes.js">
+const express = require('express');
+const router = express.Router();
+const authController = require('../controllers/authController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+// Rutas Públicas de Autenticación
+router.post('/register-tenant', authController.registerTenant);
+router.post('/login', authController.login);
+
+// Rutas Protegidas en Fligo
+router.get('/profile', verificarToken, authController.getProfile);
+router.post('/empleados', verificarToken, autorizarRoles('OWNER', 'MANAGER'), authController.createEmpleado);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/clienteRoutes.js">
+const express = require('express');
+const router = express.Router();
+const clienteController = require('../controllers/clienteController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+// Todas las rutas de clientes requieren estar autenticado en Fligo
+router.use(verificarToken);
+
+router.post('/', clienteController.crearCliente);
+router.get('/', clienteController.obtenerClientes);
+router.get('/:id', clienteController.obtenerClientePorId);
+router.put('/:id', clienteController.actualizarCliente);
+router.delete('/:id', autorizarRoles('OWNER', 'MANAGER'), clienteController.eliminarCliente);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/comunicacionRoutes.js">
+const express = require('express');
+const router = express.Router();
+const comunicacionController = require('../controllers/comunicacionController');
+const { verificarToken } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+router.post('/', comunicacionController.registrarInteraccion);
+router.get('/', comunicacionController.obtenerInteracciones);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/configuracionRoutes.js">
+const express = require('express');
+const router = express.Router();
+const configuracionController = require('../controllers/configuracionController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+// Configuración general de la empresa
+router.get('/', configuracionController.obtenerConfiguracion);
+router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
+
+// Gestión de Tiendas / Sucursales
+router.get('/tiendas', configuracionController.obtenerTiendas);
+router.post('/tiendas', autorizarRoles('OWNER'), configuracionController.crearTienda);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/leadRoutes.js">
+const express = require('express');
+const router = express.Router();
+const leadController = require('../controllers/leadController');
+const { verificarToken } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+router.post('/', leadController.crearLead);
+router.get('/', leadController.obtenerPipeline);
+router.put('/:id/etapa', leadController.actualizarEtapaLead);
+router.post('/tareas', leadController.crearTareaLead);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/productoRoutes.js">
+const express = require('express');
+const router = express.Router();
+const productoController = require('../controllers/productoController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+router.post('/', autorizarRoles('OWNER', 'MANAGER'), productoController.crearProducto);
+router.get('/', productoController.obtenerProductos);
+router.post('/inventario/ajustar', autorizarRoles('OWNER', 'MANAGER'), productoController.ajustarInventario);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/reporteRoutes.js">
+const express = require('express');
+const router = express.Router();
+const reporteController = require('../controllers/reporteController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+// Endpoint accesible para todos los usuarios autenticados (filtra según su rol/tienda)
+router.get('/dashboard', reporteController.obtenerDashboardSummary);
+
+// Endpoints gerenciales (Solo OWNER y MANAGER)
+router.get('/tiendas', autorizarRoles('OWNER', 'MANAGER'), reporteController.obtenerVentasPorTienda);
+router.get('/vendedores', autorizarRoles('OWNER', 'MANAGER'), reporteController.obtenerRankingVendedores);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/ventaRoutes.js">
+const express = require('express');
+const router = express.Router();
+const ventaController = require('../controllers/ventaController');
+const { verificarToken } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+// Ventas y POS
+router.post('/ventas', ventaController.registrarVenta);
+router.get('/ventas', ventaController.obtenerVentas);
+
+// Cotizaciones / Presupuestos
+router.post('/cotizaciones', ventaController.crearCotizacion);
+
+module.exports = router;
+</file>
+
+<file path="src/app.js">
+const express = require('express');
+const cors = require('cors');
+require('dotenv').config();
+
+// Importación de Rutas de Todos los Módulos de Fligo
+const authRoutes = require('./routes/authRoutes');
+const clienteRoutes = require('./routes/clienteRoutes');
+const productoRoutes = require('./routes/productoRoutes');
+const ventaRoutes = require('./routes/ventaRoutes');
+const reporteRoutes = require('./routes/reporteRoutes');
+const leadRoutes = require('./routes/leadRoutes');
+const comunicacionRoutes = require('./routes/comunicacionRoutes');
+const configuracionRoutes = require('./routes/configuracionRoutes');
+
+const app = express();
+
+// Middlewares Globales
+app.use(cors());
+app.use(express.json());
+
+// Endpoint de Diagnóstico y Salud de la API
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    app: 'Fligo Engine API', 
+    status: 'ONLINE', 
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date() 
+  });
+});
+
+// Registro de Rutas Mapeadas por Módulo en Fligo
+app.use('/api/auth', authRoutes);
+app.use('/api/clientes', clienteRoutes);
+app.use('/api/productos', productoRoutes);
+app.use('/api/reportes', reporteRoutes);
+app.use('/api/leads', leadRoutes);
+app.use('/api/comunicaciones', comunicacionRoutes);
+app.use('/api/configuracion', configuracionRoutes);
+app.use('/api', ventaRoutes);
+
+// Manejo de Rutas Inexistentes (404)
+app.use((req, res) => {
+  res.status(404).json({ 
+    success: false, 
+    error: 'Ruta no encontrada en Fligo API.' 
+  });
+});
+
+// Manejo Global de Errores (500)
+app.use((err, req, res, next) => {
+  console.error('❌ [Fligo Internal Error]:', err.stack);
+  res.status(500).json({
+    success: false,
+    error: 'Error interno del servidor en Fligo API.'
+  });
+});
+
+const PORT = process.env.PORT || 10000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 [Fligo Engine] Servidor iniciado correctamente en el puerto ${PORT}`);
+});
+
+module.exports = app;
+</file>
+
+<file path=".gitattributes">
+# Auto detect text files and perform LF normalization
+* text=auto
+</file>
+
+<file path="database.sql">
+-- Creación de la base de datos para Fligo
+-- CREATE DATABASE fligo_db;
+
+-- Habilitar extensión para UUIDs
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Tabla de Inquilinos / Empresas (Tenants de Fligo)
+CREATE TABLE tenants (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    nombre_empresa VARCHAR(150) NOT NULL,
+    plan VARCHAR(50) DEFAULT 'basic',
+    activo BOOLEAN DEFAULT TRUE,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla de Tiendas / Sucursales por Empresa
+CREATE TABLE tiendas (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    nombre VARCHAR(100) NOT NULL,
+    direccion TEXT,
+    telefono VARCHAR(30),
+    activa BOOLEAN DEFAULT TRUE,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla de Usuarios / Empleados de Fligo
+-- Roles: 'SUPERADMIN', 'OWNER', 'MANAGER', 'EMPLOYEE'
+CREATE TABLE usuarios (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tienda_id UUID REFERENCES tiendas(id) ON DELETE SET NULL, -- NULL si es OWNER
+    nombre VARCHAR(100) NOT NULL,
+    email VARCHAR(120) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    rol VARCHAR(30) NOT NULL DEFAULT 'EMPLOYEE',
+    activo BOOLEAN DEFAULT TRUE,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- Tabla de Clientes de Fligo (Multi-Tenant y Multi-Tienda)
+CREATE TABLE clientes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tienda_id UUID REFERENCES tiendas(id) ON DELETE SET NULL, -- Tienda de origen/preferida
+    nombre VARCHAR(120) NOT NULL,
+    documento_identidad VARCHAR(50), -- RIF, Cédula, DNI, Pass
+    email VARCHAR(120),
+    telefono VARCHAR(30),
+    direccion TEXT,
+    categoria VARCHAR(50) DEFAULT 'General', -- 'VIP', 'Mayorista', 'Frecuente', 'General'
+    notas TEXT,
+    activo BOOLEAN DEFAULT TRUE,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- Tabla de Productos Centralizados en Fligo
+CREATE TABLE productos (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    codigo_sku VARCHAR(50) NOT NULL,
+    codigo_barras VARCHAR(100),
+    nombre VARCHAR(150) NOT NULL,
+    descripcion TEXT,
+    categoria VARCHAR(80) DEFAULT 'General',
+    precio_base DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    costo DECIMAL(12, 2) DEFAULT 0.00,
+    activo BOOLEAN DEFAULT TRUE,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_sku_per_tenant UNIQUE (tenant_id, codigo_sku)
+);
+
+-- Tabla de Inventario por Sucursal/Tienda
+CREATE TABLE inventario_tienda (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tienda_id UUID NOT NULL REFERENCES tiendas(id) ON DELETE CASCADE,
+    producto_id UUID NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+    stock_actual INT NOT NULL DEFAULT 0,
+    stock_minimo INT NOT NULL DEFAULT 5,
+    actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_producto_tienda UNIQUE (tienda_id, producto_id)
+);
+
+-- Tabla para Historial y Trazabilidad de Movimientos
+-- Tipos: 'ENTRADA', 'SALIDA', 'AJUSTE', 'VENTA', 'TRANSFERENCIA'
+CREATE TABLE movimientos_inventario (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tienda_id UUID NOT NULL REFERENCES tiendas(id) ON DELETE CASCADE,
+    producto_id UUID NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+    usuario_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    tipo_movimiento VARCHAR(30) NOT NULL,
+    cantidad INT NOT NULL,
+    stock_resultante INT NOT NULL,
+    motivo TEXT,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- Tabla de Cotizaciones / Presupuestos en Fligo
+CREATE TABLE cotizaciones (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tienda_id UUID NOT NULL REFERENCES tiendas(id) ON DELETE CASCADE,
+    cliente_id UUID REFERENCES clientes(id) ON DELETE SET NULL,
+    usuario_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    subtotal DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    impuesto DECIMAL(12, 2) DEFAULT 0.00,
+    descuento DECIMAL(12, 2) DEFAULT 0.00,
+    total DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    estado VARCHAR(30) DEFAULT 'PENDIENTE', -- 'PENDIENTE', 'APROBADA', 'RECHAZADA', 'CONVERTIDA'
+    notas TEXT,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Detalle de Ítems en Cotización
+CREATE TABLE detalle_cotizacion (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    cotizacion_id UUID NOT NULL REFERENCES cotizaciones(id) ON DELETE CASCADE,
+    producto_id UUID REFERENCES productos(id) ON DELETE SET NULL,
+    cantidad INT NOT NULL DEFAULT 1,
+    precio_unitario DECIMAL(12, 2) NOT NULL,
+    subtotal DECIMAL(12, 2) NOT NULL
+);
+
+-- Tabla de Ventas / Pedidos POS en Fligo
+CREATE TABLE ventas (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tienda_id UUID NOT NULL REFERENCES tiendas(id) ON DELETE CASCADE,
+    cliente_id UUID REFERENCES clientes(id) ON DELETE SET NULL,
+    usuario_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    cotizacion_id UUID REFERENCES cotizaciones(id) ON DELETE SET NULL,
+    metodo_pago VARCHAR(50) NOT NULL, -- 'EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA'
+    subtotal DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    impuesto DECIMAL(12, 2) DEFAULT 0.00,
+    descuento DECIMAL(12, 2) DEFAULT 0.00,
+    total DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
+    estado VARCHAR(30) DEFAULT 'COMPLETADA', -- 'COMPLETADA', 'ANULADA'
+    notas TEXT,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Detalle de Ítems de la Venta
+CREATE TABLE detalle_venta (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    venta_id UUID NOT NULL REFERENCES ventas(id) ON DELETE CASCADE,
+    producto_id UUID REFERENCES productos(id) ON DELETE SET NULL,
+    cantidad INT NOT NULL DEFAULT 1,
+    precio_unitario DECIMAL(12, 2) NOT NULL,
+    subtotal DECIMAL(12, 2) NOT NULL
+);
+-- =========================================================
+-- MÓDULO 6: EMBUDO DE VENTAS Y PROSPECTOS (LEADS & PIPELINE)
+-- =========================================================
+CREATE TABLE leads (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tienda_id UUID REFERENCES tiendas(id) ON DELETE SET NULL,
+    vendedor_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    cliente_id UUID REFERENCES clientes(id) ON DELETE SET NULL,
+    nombre VARCHAR(120) NOT NULL,
+    email VARCHAR(120),
+    telefono VARCHAR(30),
+    empresa_origen VARCHAR(120),
+    valor_estimado DECIMAL(12, 2) DEFAULT 0.00,
+    etapa VARCHAR(50) DEFAULT 'NUEVO', -- 'NUEVO', 'CONTACTADO', 'COTIZADO', 'NEGOCIACION', 'GANADO', 'PERDIDO'
+    motivo_cierre TEXT,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tareas_lead (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    lead_id UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+    usuario_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    titulo VARCHAR(150) NOT NULL,
+    descripcion TEXT,
+    tipo VARCHAR(50) DEFAULT 'LLAMADA', -- 'LLAMADA', 'REUNION', 'EMAIL', 'WHATSAPP', 'OTRO'
+    fecha_vencimiento TIMESTAMP NOT NULL,
+    completada BOOLEAN DEFAULT FALSE,
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================================
+-- MÓDULO 7: COMUNICACIONES E INTERACCIONES (OMNICANAL)
+-- =========================================================
+CREATE TABLE interacciones (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    cliente_id UUID REFERENCES clientes(id) ON DELETE CASCADE,
+    lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
+    usuario_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+    canal VARCHAR(50) NOT NULL, -- 'WHATSAPP', 'EMAIL', 'LLAMADA', 'NOTA_INTERNA'
+    mensaje TEXT NOT NULL,
+    metadata JSONB, -- Datos adicionales (ej: ID mensaje WhatsApp, estado de entrega)
+    creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================================
+-- MÓDULO 8: CONFIGURACIÓN DE EMPRESA Y SUSCRIPCIÓN SAAS
+-- =========================================================
+CREATE TABLE configuracion_empresa (
+    tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    logo_url TEXT,
+    moneda_principal VARCHAR(10) DEFAULT 'USD',
+    simbolo_moneda VARCHAR(5) DEFAULT '$',
+    impuesto_defecto DECIMAL(5, 2) DEFAULT 16.00,
+    tasa_cambio DECIMAL(12, 4) DEFAULT 1.0000,
+    direccion_fiscal TEXT,
+    documento_fiscal VARCHAR(50), -- RIF / NIT / DNI Fiscal
+    actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ÍNDICES PARA RENDIMIENTO
+CREATE INDEX idx_leads_tenant_etapa ON leads(tenant_id, etapa);
+CREATE INDEX idx_tareas_lead ON tareas_lead(lead_id, fecha_vencimiento);
+CREATE INDEX idx_interacciones_cliente ON interacciones(cliente_id);
+CREATE INDEX idx_interacciones_lead ON interacciones(lead_id);
+
+-- Índices para optimización de reportes y consultas
+CREATE INDEX idx_ventas_tenant_tienda ON ventas(tenant_id, tienda_id);
+CREATE INDEX idx_ventas_fecha ON ventas(creado_en);
+CREATE INDEX idx_cotizaciones_tenant_tienda ON cotizaciones(tenant_id, tienda_id);
+
+-- Índices de Rendimiento
+CREATE INDEX idx_productos_tenant ON productos(tenant_id);
+CREATE INDEX idx_productos_busqueda ON productos(tenant_id, codigo_sku, codigo_barras, nombre);
+CREATE INDEX idx_inventario_tienda ON inventario_tienda(tienda_id, producto_id);
+CREATE INDEX idx_movimientos_tenant_tienda ON movimientos_inventario(tenant_id, tienda_id);
+
+-- Índices para búsquedas rápidas y aislamiento
+CREATE INDEX idx_clientes_tenant ON clientes(tenant_id);
+CREATE INDEX idx_clientes_tienda ON clientes(tienda_id);
+CREATE INDEX idx_clientes_busqueda ON clientes(tenant_id, nombre, documento_identidad, email);
+
+-- Índices de rendimiento
+CREATE INDEX idx_tiendas_tenant ON tiendas(tenant_id);
+CREATE INDEX idx_usuarios_tenant ON usuarios(tenant_id);
+CREATE INDEX idx_usuarios_tienda ON usuarios(tienda_id);
+</file>
+
+<file path="package.json">
+{
+  "name": "fligo-backend",
+  "version": "1.0.0",
+  "description": "API Backend para Fligo - CRM Multitienda SaaS",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
+</file>
+
+</files>
