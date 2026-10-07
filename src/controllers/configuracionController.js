@@ -47,10 +47,11 @@ exports.obtenerTasasBcv = async (req, res) => {
   }
   try {
     const html = await downloadPaginaBcv();
-    const fechaValor = html.match(/Fecha\s+Valor:\s*([^<]+)/i)?.[1]
+    const fechaValor = html.match(/Fecha\s+Valor:\s*(?:<[^>]*>\s*)*([^<]+)/i)?.[1]
       ?.replace(/<[^>]*>/g, '')
       .replace(/&nbsp;|&#160;/gi, ' ')
       .replace(/&amp;/gi, '&')
+      .replace(/\s+/g, ' ')
       .trim();
     const tasas = {
       usd_ves: parseTasaBcv(html, 'dolar'),
@@ -75,7 +76,7 @@ exports.obtenerTasasBcv = async (req, res) => {
 exports.parseTasasBcv = html => ({
   usd_ves: parseTasaBcv(html, 'dolar'),
   eur_ves: parseTasaBcv(html, 'euro'),
-  fecha_valor: html.match(/Fecha\s+Valor:\s*([^<]+)/i)?.[1]?.trim() || null
+  fecha_valor: html.match(/Fecha\s+Valor:\s*(?:<[^>]*>\s*)*([^<]+)/i)?.[1]?.replace(/\s+/g, ' ').trim() || null
 });
 
 // 1. Obtener o crear configuración global de la empresa
