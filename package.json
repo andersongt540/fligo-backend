@@ -4,8 +4,8 @@
   "description": "API Backend para Fligo - CRM Multitienda SaaS",
   "main": "src/app.js",
   "scripts": {
-    "start": "node src/app.js",
-    "dev": "nodemon src/app.js"
+    "start": "node --use-system-ca src/app.js",
+    "dev": "nodemon --exec \"node --use-system-ca\" src/app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
