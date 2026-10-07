@@ -1,5 +1,12 @@
 const db = require('../config/db');
 const https = require('https');
+const tls = require('tls');
+const fs = require('fs');
+const path = require('path');
+
+const bcvCertificateAuthority = fs.readFileSync(
+  path.join(__dirname, '../certs/sectigo-public-server-authentication-ca-dv-r36.pem')
+);
 
 let tasaBcvCache = null;
 let tasaBcvFetchedAt = 0;
@@ -20,7 +27,8 @@ function parseTasaBcv(html, id) {
 function downloadPaginaBcv() {
   return new Promise((resolve, reject) => {
     const request = https.get('https://www.bcv.org.ve/', {
-      headers: { 'User-Agent': 'Fligo CRM/1.0 (consulta de tipo de cambio)', Accept: 'text/html' }
+      headers: { 'User-Agent': 'Fligo CRM/1.0 (consulta de tipo de cambio)', Accept: 'text/html' },
+      ca: [...tls.rootCertificates, bcvCertificateAuthority]
     }, response => {
       if (response.statusCode !== 200) {
         response.resume();
