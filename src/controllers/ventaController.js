@@ -37,7 +37,6 @@ exports.registrarVenta = async (req, res) => {
       console.error('Error en registrarVenta [BCV]:', error);
       return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para convertir el pago y calcular el IGTF.' });
     }
-    let igtfUsdCentimos = 0;
     pagosValidados = pagos.map(pago => {
       const legacyUsdAmount = pago.moneda === undefined;
       const moneda = legacyUsdAmount ? 'USD' : pago.moneda;
@@ -48,9 +47,7 @@ exports.registrarVenta = async (req, res) => {
         : moneda === 'VES'
           ? Math.round(monto * 100)
           : Math.round(monto * tasaMoneda * 100);
-      const igtfBsCentimos = pago.metodo_pago === 'DIVISA' ? Math.round(montoBsCentimos * 0.03) : 0;
       const montoUsdCentimos = Math.round(montoBsCentimos / tasaPago.usd_ves);
-      igtfUsdCentimos += Math.round(igtfBsCentimos / tasaPago.usd_ves);
       return {
         metodo_pago: pago.metodo_pago,
         moneda,
@@ -58,10 +55,9 @@ exports.registrarVenta = async (req, res) => {
         monto_usd: montoUsdCentimos / 100,
         monto_usd_centimos: montoUsdCentimos,
         monto_bs_centimos: montoBsCentimos,
-        igtf_bs_centimos: igtfBsCentimos
+        igtf_bs_centimos: 0
       };
     });
-    igtfUsd = igtfUsdCentimos / 100;
   }
 
   if (!productos || !Array.isArray(productos) || productos.length === 0) {
@@ -129,6 +125,18 @@ exports.registrarVenta = async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: 'El impuesto y el descuento deben ser montos válidos no negativos.' });
     }
+    if (pagosValidados) {
+      let baseDivisaRestante = Math.max(0, Math.round((subtotalCalculado + impuestoBase - descuentoVenta) * tasaPago.usd_ves * 100));
+      let igtfUsdCentimos = 0;
+      pagosValidados.forEach(pago => {
+        if (pago.metodo_pago !== 'DIVISA') return;
+        const baseIgtfCentimos = Math.min(pago.monto_bs_centimos, baseDivisaRestante);
+        baseDivisaRestante -= baseIgtfCentimos;
+        pago.igtf_bs_centimos = Math.round(baseIgtfCentimos * 0.03);
+        igtfUsdCentimos += Math.round(pago.igtf_bs_centimos / tasaPago.usd_ves);
+      });
+      igtfUsd = igtfUsdCentimos / 100;
+    }
     const totalCalculado = subtotalCalculado + impuestoBase + igtfUsd - descuentoVenta;
     if (pagosValidados) {
       const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + pago.monto_usd_centimos, 0);
@@ -150,7 +158,7 @@ exports.registrarVenta = async (req, res) => {
       ? [
         notas,
         `Pagos: ${pagosValidados.map(pago => `${pago.metodo_pago}${pago.metodo_pago === 'DIVISA' ? ` ${pago.moneda}` : ''} ${pago.monto.toFixed(2)} ${pago.moneda}`).join('; ')}.`,
-        igtfUsd > 0 ? `IGTF 3% sobre toda la divisa recibida: Bs. ${(pagosValidados.reduce((total, pago) => total + pago.igtf_bs_centimos, 0) / 100).toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null,
+        igtfUsd > 0 ? `IGTF 3% sobre la porción de la factura aplicada en divisa: Bs. ${(pagosValidados.reduce((total, pago) => total + pago.igtf_bs_centimos, 0) / 100).toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null,
         vueltoValidado && (vueltoValidado.usd > 0 || vueltoValidado.ves > 0)
           ? `Vuelto entregado: USD ${vueltoValidado.usd.toFixed(2)} + Bs. ${vueltoValidado.ves.toFixed(2)}.`
           : null
