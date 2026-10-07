@@ -4,12 +4,25 @@ const db = require('../config/db');
 exports.crearCliente = async (req, res) => {
   const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
   const tenant_id = req.user.tenant_id; // Garantiza aislamiento Multi-Tenant
+  const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
+  const documentoLimpio = typeof documento_identidad === 'string' ? documento_identidad.trim().toUpperCase() : '';
+  const telefonoLimpio = typeof telefono === 'string' ? telefono.trim() : '';
+  const direccionLimpia = typeof direccion === 'string' ? direccion.trim() : '';
   
   // Si no se especifica tienda_id, asigna la tienda del usuario conectado
   const tiendaAsignada = tienda_id || req.user.tienda_id;
 
-  if (!nombre) {
-    return res.status(400).json({ success: false, error: 'El nombre del cliente es obligatorio.' });
+  if (!documentoLimpio || !nombreLimpio || !telefonoLimpio || !direccionLimpia) {
+    return res.status(400).json({ success: false, error: 'La cédula, el nombre, el teléfono y la dirección corta del cliente son obligatorios.' });
+  }
+  if (!/^[VEJPG]?[-\s]?\d{5,12}$/i.test(documentoLimpio)) {
+    return res.status(400).json({ success: false, error: 'Ingresa una cédula de identidad válida.' });
+  }
+  if (!/^[+\d\s().-]{7,30}$/.test(telefonoLimpio)) {
+    return res.status(400).json({ success: false, error: 'Ingresa un teléfono válido para el cliente.' });
+  }
+  if (telefonoLimpio.length > 30 || direccionLimpia.length > 500 || nombreLimpio.length > 120) {
+    return res.status(400).json({ success: false, error: 'Revisa la longitud del nombre, teléfono o dirección del cliente.' });
   }
 
   try {
@@ -17,7 +30,7 @@ exports.crearCliente = async (req, res) => {
       `INSERT INTO clientes (tenant_id, tienda_id, nombre, documento_identidad, email, telefono, direccion, categoria, notas)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [tenant_id, tiendaAsignada, nombre, documento_identidad || null, email || null, telefono || null, direccion || null, categoria || 'General', notas || null]
+      [tenant_id, tiendaAsignada, nombreLimpio, documentoLimpio, typeof email === 'string' && email.trim() ? email.trim() : null, telefonoLimpio, direccionLimpia, categoria || 'General', typeof notas === 'string' && notas.trim() ? notas.trim() : null]
     );
 
     res.status(201).json({
@@ -58,7 +71,14 @@ exports.obtenerClientes = async (req, res) => {
   // Búsqueda por Nombre, Email o Documento de Identidad
   if (busqueda) {
     params.push(`%${busqueda}%`);
-    conditions.push(`(c.nombre ILIKE $${params.length} OR c.email ILIKE $${params.length} OR c.documento_identidad ILIKE $${params.length})`);
+    const searchParameter = params.length;
+    const normalizedDocument = busqueda.toLocaleUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (normalizedDocument) {
+      params.push(`%${normalizedDocument}%`);
+      conditions.push(`(c.nombre ILIKE $${searchParameter} OR c.email ILIKE $${searchParameter} OR c.documento_identidad ILIKE $${searchParameter} OR regexp_replace(upper(c.documento_identidad), '[^A-Z0-9]', '', 'g') ILIKE $${params.length})`);
+    } else {
+      conditions.push(`(c.nombre ILIKE $${searchParameter} OR c.email ILIKE $${searchParameter} OR c.documento_identidad ILIKE $${searchParameter})`);
+    }
   }
 
   const whereClause = conditions.join(' AND ');
