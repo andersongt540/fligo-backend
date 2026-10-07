@@ -13,10 +13,13 @@ exports.registrarVenta = async (req, res) => {
   let vueltoValidado = null;
 
   if (vuelto !== undefined) {
-    if (!vuelto || !['VES', 'USD'].includes(vuelto.moneda) || !Number.isFinite(Number(vuelto.monto)) || Number(vuelto.monto) < 0) {
-      return res.status(400).json({ success: false, error: 'El vuelto debe tener una moneda y un monto válidos no negativos.' });
+    const legacyChange = vuelto && ['VES', 'USD'].includes(vuelto.moneda);
+    const usd = Number(legacyChange ? (vuelto.moneda === 'USD' ? vuelto.monto : 0) : vuelto && vuelto.usd !== undefined ? vuelto.usd : 0);
+    const ves = Number(legacyChange ? (vuelto.moneda === 'VES' ? vuelto.monto : 0) : vuelto && vuelto.ves !== undefined ? vuelto.ves : 0);
+    if (!vuelto || !Number.isFinite(usd) || usd < 0 || !Number.isFinite(ves) || ves < 0) {
+      return res.status(400).json({ success: false, error: 'El vuelto en dólares y bolívares debe tener montos válidos no negativos.' });
     }
-    vueltoValidado = { moneda: vuelto.moneda, monto: Number(vuelto.monto) };
+    vueltoValidado = { usd, ves };
   }
 
   if (pagos !== undefined) {
@@ -130,9 +133,7 @@ exports.registrarVenta = async (req, res) => {
     if (pagosValidados) {
       const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + pago.monto_usd_centimos, 0);
       const vueltoBsCentimos = vueltoValidado
-        ? vueltoValidado.moneda === 'VES'
-          ? Math.round(vueltoValidado.monto * 100)
-          : Math.round(vueltoValidado.monto * tasaPago.usd_ves * 100)
+        ? Math.round(vueltoValidado.usd * tasaPago.usd_ves * 100) + Math.round(vueltoValidado.ves * 100)
         : 0;
       const vueltoUsdCentimos = Math.round(vueltoBsCentimos / tasaPago.usd_ves);
       if (vueltoUsdCentimos > montoPagadoCentavos || Math.abs(montoPagadoCentavos - vueltoUsdCentimos - Math.round(totalCalculado * 100)) > 1) {
@@ -150,7 +151,9 @@ exports.registrarVenta = async (req, res) => {
         notas,
         `Pagos: ${pagosValidados.map(pago => `${pago.metodo_pago}${pago.metodo_pago === 'DIVISA' ? ` ${pago.moneda}` : ''} ${pago.monto.toFixed(2)} ${pago.moneda}`).join('; ')}.`,
         igtfUsd > 0 ? `IGTF 3% sobre toda la divisa recibida: Bs. ${(pagosValidados.reduce((total, pago) => total + pago.igtf_bs_centimos, 0) / 100).toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null,
-        vueltoValidado && vueltoValidado.monto > 0 ? `Vuelto entregado: ${vueltoValidado.monto.toFixed(2)} ${vueltoValidado.moneda}.` : null
+        vueltoValidado && (vueltoValidado.usd > 0 || vueltoValidado.ves > 0)
+          ? `Vuelto entregado: USD ${vueltoValidado.usd.toFixed(2)} + Bs. ${vueltoValidado.ves.toFixed(2)}.`
+          : null
       ].filter(Boolean).join('\n')
       : notas || null;
 
