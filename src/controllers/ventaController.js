@@ -2,15 +2,26 @@ const db = require('../config/db');
 
 // 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
 exports.registrarVenta = async (req, res) => {
-  const { cliente_id, productos, metodo_pago, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
+  const { cliente_id, productos, metodo_pago, pagos, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
   const tenant_id = req.user.tenant_id;
   const targetTiendaId = tienda_id || req.user.tienda_id;
+  const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA']);
+  let pagosValidados = null;
+
+  if (pagos !== undefined) {
+    if (!Array.isArray(pagos) || pagos.length === 0 || pagos.some(pago =>
+      !pago || !metodosPermitidos.has(pago.metodo_pago) || !Number.isFinite(Number(pago.monto)) || Number(pago.monto) <= 0
+    )) {
+      return res.status(400).json({ success: false, error: 'Debes indicar al menos un método de pago válido y su monto.' });
+    }
+    pagosValidados = pagos.map(pago => ({ metodo_pago: pago.metodo_pago, monto: Number(pago.monto) }));
+  }
 
   if (!productos || !Array.isArray(productos) || productos.length === 0) {
     return res.status(400).json({ success: false, error: 'La venta debe contener al menos un producto.' });
   }
 
-  if (!metodo_pago) {
+  if (!metodo_pago && !pagosValidados) {
     return res.status(400).json({ success: false, error: 'Debes especificar el método de pago.' });
   }
 
@@ -66,13 +77,26 @@ exports.registrarVenta = async (req, res) => {
     }
 
     const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+    if (pagosValidados) {
+      const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + Math.round(pago.monto * 100), 0);
+      if (montoPagadoCentavos !== Math.round(totalCalculado * 100)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, error: 'La suma de los pagos debe coincidir con el total de la venta.' });
+      }
+    }
+    const metodoPagoVenta = pagosValidados
+      ? pagosValidados.length === 1 ? pagosValidados[0].metodo_pago : 'MIXTO'
+      : metodo_pago;
+    const notasVenta = pagosValidados
+      ? [notas, `Pagos (USD): ${pagosValidados.map(pago => `${pago.metodo_pago} ${pago.monto.toFixed(2)}`).join('; ')}.`].filter(Boolean).join('\n')
+      : notas || null;
 
     // Insertar Cabecera de Venta
     const ventaRes = await client.query(
       `INSERT INTO ventas (tenant_id, tienda_id, cliente_id, usuario_id, cotizacion_id, metodo_pago, subtotal, impuesto, descuento, total, notas)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
-      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodo_pago, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodoPagoVenta, subtotalCalculado, impuesto, descuento, totalCalculado, notasVenta]
     );
 
     const nuevaVenta = ventaRes.rows[0];
