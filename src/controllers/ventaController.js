@@ -44,7 +44,7 @@ exports.registrarVenta = async (req, res) => {
          FROM productos p
          LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $1
          WHERE p.id = $2 AND p.tenant_id = $3 AND p.activo = TRUE
-         FOR UPDATE`,
+         FOR UPDATE OF p`,
         [targetTiendaId, item.producto_id, tenant_id]
       );
 
