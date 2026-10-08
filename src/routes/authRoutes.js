@@ -3,9 +3,9 @@ const router = express.Router();
 const authController = require('../controllers/authController');
 const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
 
-// Rutas Públicas de Autenticación
-router.post('/register-tenant', authController.registerTenant);
-router.post('/login', authController.login);
+// Firebase verifies the identity; Fligo provisions and authorizes the local account.
+router.post('/firebase-session', authController.firebaseSession);
+router.post('/migrate-legacy', authController.migrateLegacyAccount);
 
 // Rutas Protegidas en Fligo
 router.get('/profile', verificarToken, authController.getProfile);

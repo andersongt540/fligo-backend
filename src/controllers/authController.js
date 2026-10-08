@@ -1,222 +1,258 @@
+const crypto = require('crypto');
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const firebaseAdmin = require('../config/firebaseAdmin');
 const { estadoSuscripcion } = require('../utils/suscripcion');
 
-// 1. Registro de Empresa e Inicio en Fligo (Onboarding)
-exports.registerTenant = async (req, res) => {
-  const { nombre_empresa, nombre_usuario, email, password } = req.body;
+function createSession(user, res) {
+  const token = jwt.sign(
+    {
+      user_id: user.id,
+      tenant_id: user.tenant_id,
+      tienda_id: user.tienda_id,
+      rol: user.rol
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+  );
 
-  if (!nombre_empresa || !nombre_usuario || !email || !password) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Todos los campos son obligatorios para crear tu cuenta en Fligo.' 
-    });
+  res.json({
+    success: true,
+    message: 'Inicio de sesión exitoso en Fligo.',
+    data: {
+      token,
+      usuario: {
+        id: user.id,
+        nombre: user.nombre,
+        email: user.email,
+        rol: user.rol,
+        tenant_id: user.tenant_id,
+        tienda_id: user.tienda_id,
+        empresa: user.nombre_empresa
+      },
+      suscripcion: estadoSuscripcion(user)
+    }
+  });
+}
+
+exports.firebaseSession = async (req, res) => {
+  const { idToken, registro } = req.body;
+  if (!idToken) {
+    return res.status(400).json({ success: false, error: 'Falta la credencial de Firebase.' });
+  }
+
+  let firebaseUser;
+  try {
+    const decodedToken = await firebaseAdmin.auth().verifyIdToken(idToken);
+    if (!decodedToken.email || !decodedToken.email_verified) {
+      return res.status(403).json({
+        success: false,
+        error: 'Verifica tu correo electrónico antes de acceder a Fligo.'
+      });
+    }
+    firebaseUser = {
+      uid: decodedToken.uid,
+      email: decodedToken.email.trim().toLowerCase(),
+      name: decodedToken.name || decodedToken.email.split('@')[0]
+    };
+  } catch (error) {
+    console.error('Error al verificar identidad de Firebase [Fligo]:', error);
+    return res.status(401).json({ success: false, error: 'La sesión de Firebase no es válida. Inicia sesión nuevamente.' });
   }
 
   const client = await db.pool.connect();
-
   try {
     await client.query('BEGIN');
+    let userResult = await client.query(
+      `SELECT u.id, u.firebase_uid, u.tenant_id, u.tienda_id, u.nombre, u.email, u.rol, u.activo,
+              t.nombre_empresa, t.prueba_hasta, t.suscripcion_hasta
+       FROM usuarios u
+       JOIN tenants t ON u.tenant_id = t.id
+       WHERE u.firebase_uid = $1 OR LOWER(u.email) = $2
+       FOR UPDATE OF u`,
+      [firebaseUser.uid, firebaseUser.email]
+    );
 
-    // Verificar si el usuario ya está registrado en Fligo
-    const existingUser = await client.query('SELECT id FROM usuarios WHERE email = $1', [email]);
-    if (existingUser.rows.length > 0) {
+    if (userResult.rows.length > 1) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        success: false, 
-        error: 'El correo electrónico ya está registrado en Fligo.' 
+      return res.status(409).json({ success: false, error: 'No se pudo asociar esta identidad a una única cuenta de Fligo.' });
+    }
+
+    let user = userResult.rows[0];
+    if (user && user.firebase_uid && user.firebase_uid !== firebaseUser.uid) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        success: false,
+        error: 'Este correo ya está asociado a otra cuenta de acceso. Contacta al administrador.'
       });
     }
 
-    // Crear Empresa / Inquilino en Fligo
-    const tenantRes = await client.query(
-      `INSERT INTO tenants (nombre_empresa, prueba_hasta)
-       VALUES ($1, CURRENT_TIMESTAMP + INTERVAL '7 days')
-       RETURNING id, nombre_empresa, plan, prueba_hasta, suscripcion_hasta`,
-      [nombre_empresa]
-    );
-    const newTenant = tenantRes.rows[0];
+    if (!user) {
+      const companyName = typeof registro?.nombre_empresa === 'string' ? registro.nombre_empresa.trim() : '';
+      if (!companyName || companyName.length > 150) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({
+          success: false,
+          error: 'No existe una cuenta de Fligo para este correo. Regístrate para crear tu empresa.'
+        });
+      }
 
-    // Crear la Sucursal / Tienda Principal inicial
-    const tiendaRes = await client.query(
-      'INSERT INTO tiendas (tenant_id, nombre) VALUES ($1, $2) RETURNING id, nombre',
-      [newTenant.id, 'Sucursal Principal']
-    );
-    const newTienda = tiendaRes.rows[0];
+      const tenantResult = await client.query(
+        `INSERT INTO tenants (nombre_empresa, prueba_hasta)
+         VALUES ($1, CURRENT_TIMESTAMP + INTERVAL '7 days')
+         RETURNING id, nombre_empresa, prueba_hasta, suscripcion_hasta`,
+        [companyName]
+      );
+      const tenant = tenantResult.rows[0];
+      const storeResult = await client.query(
+        'INSERT INTO tiendas (tenant_id, nombre) VALUES ($1, $2) RETURNING id, nombre',
+        [tenant.id, 'Sucursal Principal']
+      );
+      const store = storeResult.rows[0];
+      const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+      const newUser = await client.query(
+        `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, firebase_uid, rol)
+         VALUES ($1, $2, $3, $4, $5, $6, 'OWNER')
+         RETURNING id, firebase_uid, tenant_id, tienda_id, nombre, email, rol, activo`,
+        [tenant.id, store.id, firebaseUser.name, firebaseUser.email, passwordHash, firebaseUser.uid]
+      );
+      user = {
+        ...newUser.rows[0],
+        nombre_empresa: tenant.nombre_empresa,
+        prueba_hasta: tenant.prueba_hasta,
+        suscripcion_hasta: tenant.suscripcion_hasta
+      };
+    } else if (!user.firebase_uid) {
+      const linked = await client.query(
+        `UPDATE usuarios SET firebase_uid = $1
+         WHERE id = $2 AND firebase_uid IS NULL
+         RETURNING id`,
+        [firebaseUser.uid, user.id]
+      );
+      if (!linked.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ success: false, error: 'La cuenta ya fue asociada a otra identidad.' });
+      }
+    }
 
-    // Cifrar contraseña y crear el usuario OWNER
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
-
-    const userRes = await client.query(
-      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol) 
-       VALUES ($1, $2, $3, $4, $5, 'OWNER') RETURNING id, nombre, email, rol`,
-      [newTenant.id, newTienda.id, nombre_usuario, email, passwordHash]
-    );
+    if (!user.activo) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, error: 'Tu usuario en Fligo se encuentra inactivo. Contacta a tu administrador.' });
+    }
 
     await client.query('COMMIT');
-
-    // Generar Token JWT de Fligo
-    const token = jwt.sign(
-      {
-        user_id: userRes.rows[0].id,
-        tenant_id: newTenant.id,
-        tienda_id: newTienda.id,
-        rol: 'OWNER'
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
-
-    res.status(201).json({
-      success: true,
-      message: '¡Bienvenido a Fligo! Empresa y cuenta creadas con éxito.',
-      data: {
-        token,
-        usuario: userRes.rows[0],
-        empresa: newTenant,
-        suscripcion: {
-          estado: 'PRUEBA',
-          dias_restantes: 7,
-          prueba_hasta: newTenant.prueba_hasta,
-          suscripcion_hasta: newTenant.suscripcion_hasta
-        },
-        tienda: newTienda
-      }
-    });
-
+    createSession(user, res);
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('Error en registerTenant [Fligo]:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Error interno del servidor al registrar la cuenta en Fligo.' 
-    });
+    console.error('Error al iniciar sesión con Firebase [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error interno del servidor al iniciar sesión.' });
   } finally {
     client.release();
   }
 };
 
-// 2. Inicio de Sesión
-exports.login = async (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Por favor ingresa tu correo y contraseña.' 
-    });
+exports.migrateLegacyAccount = async (req, res) => {
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = req.body.password;
+  if (!email || typeof password !== 'string' || !password) {
+    return res.status(400).json({ success: false, error: 'Ingresa el correo y contraseña actuales de tu cuenta.' });
   }
 
   try {
     const result = await db.query(
-      `SELECT u.id, u.tenant_id, u.tienda_id, u.nombre, u.email, u.password_hash, u.rol, u.activo,
-              t.nombre_empresa, t.prueba_hasta, t.suscripcion_hasta
-       FROM usuarios u
-       JOIN tenants t ON u.tenant_id = t.id
-       WHERE u.email = $1`,
+      `SELECT id, email, nombre, password_hash, firebase_uid
+       FROM usuarios WHERE LOWER(email) = $1`,
       [email]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Credenciales inválidas en Fligo.' });
+    const user = result.rows[0];
+    if (!user || user.firebase_uid || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ success: false, error: 'No se pudo verificar la cuenta con esas credenciales.' });
     }
 
-    const usuario = result.rows[0];
-
-    if (!usuario.activo) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'Tu usuario en Fligo se encuentra inactivo. Contacta a tu administrador.' 
+    try {
+      await firebaseAdmin.auth().createUser({
+        email: user.email,
+        password,
+        displayName: user.nombre,
+        emailVerified: false
       });
-    }
-
-    const passwordValido = await bcrypt.compare(password, usuario.password_hash);
-    if (!passwordValido) {
-      return res.status(401).json({ success: false, error: 'Credenciales inválidas en Fligo.' });
-    }
-
-    // Generar Token JWT firmado
-    const token = jwt.sign(
-      {
-        user_id: usuario.id,
-        tenant_id: usuario.tenant_id,
-        tienda_id: usuario.tienda_id,
-        rol: usuario.rol
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Inicio de sesión exitoso en Fligo.',
-      data: {
-        token,
-        usuario: {
-          id: usuario.id,
-          nombre: usuario.nombre,
-          email: usuario.email,
-          rol: usuario.rol,
-          tenant_id: usuario.tenant_id,
-          tienda_id: usuario.tienda_id,
-          empresa: usuario.nombre_empresa
-        },
-        suscripcion: estadoSuscripcion(usuario)
+    } catch (error) {
+      if (error.code === 'auth/email-already-exists') {
+        return res.status(409).json({
+          success: false,
+          error: 'Ya existe una identidad Firebase para este correo. Usa “Olvidaste tu contraseña” para recuperar el acceso.'
+        });
       }
-    });
+      throw error;
+    }
 
+    res.status(201).json({
+      success: true,
+      message: 'Cuenta preparada. Inicia sesión para recibir el correo de verificación.'
+    });
   } catch (error) {
-    console.error('Error en login [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error interno del servidor al iniciar sesión.' });
+    console.error('Error al migrar cuenta anterior a Firebase [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'No se pudo preparar la migración de esta cuenta.' });
   }
 };
 
-// 3. Crear Empleado (Solo OWNER o MANAGER del Tenant)
 exports.createEmpleado = async (req, res) => {
-  const { nombre, email, password, rol, tienda_id } = req.body;
-  const tenant_id = req.user.tenant_id; // Garantiza que no se crucen datos entre empresas
+  const { nombre, email: rawEmail, password, rol, tienda_id } = req.body;
+  const email = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : '';
+  const tenant_id = req.user.tenant_id;
 
   if (!nombre || !email || !password || !rol) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Todos los campos obligatorios deben ser proporcionados.' 
-    });
+    return res.status(400).json({ success: false, error: 'Todos los campos obligatorios deben ser proporcionados.' });
+  }
+  if (!['MANAGER', 'EMPLOYEE'].includes(rol) || password.length < 6) {
+    return res.status(400).json({ success: false, error: 'El rol o la contraseña proporcionados no son válidos.' });
   }
 
+  let createdFirebaseUser;
   try {
-    const checkUser = await db.query('SELECT id FROM usuarios WHERE email = $1', [email]);
-    if (checkUser.rows.length > 0) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'El correo electrónico ya está registrado en Fligo.' 
-      });
+    const existingUser = await db.query('SELECT id FROM usuarios WHERE LOWER(email) = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'El correo electrónico ya está registrado en Fligo.' });
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
+    const firebaseUser = await firebaseAdmin.auth().createUser({
+      email,
+      password,
+      displayName: nombre,
+      emailVerified: false
+    });
+    createdFirebaseUser = firebaseUser.uid;
 
+    const passwordHash = await bcrypt.hash(password, 10);
     const result = await db.query(
-      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, firebase_uid, rol)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, nombre, email, rol, tienda_id, creado_en`,
-      [tenant_id, tienda_id || null, nombre, email, passwordHash, rol]
+      [tenant_id, tienda_id || null, nombre, email, passwordHash, firebaseUser.uid, rol]
     );
 
     res.status(201).json({
       success: true,
-      message: 'Empleado registrado exitosamente en tu equipo de Fligo.',
+      message: 'Empleado registrado. Deberá verificar su correo la primera vez que inicie sesión.',
       data: result.rows[0]
     });
-
   } catch (error) {
+    if (createdFirebaseUser) {
+      try {
+        await firebaseAdmin.auth().deleteUser(createdFirebaseUser);
+      } catch (cleanupError) {
+        console.error('No se pudo limpiar la identidad Firebase tras fallar el alta del empleado:', cleanupError);
+      }
+    }
+    if (error.code === 'auth/email-already-exists') {
+      return res.status(409).json({ success: false, error: 'Ese correo ya tiene una cuenta de acceso. Contacta al administrador.' });
+    }
     console.error('Error en createEmpleado [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error al registrar el empleado.' });
   }
 };
 
-// 4. Obtener Perfil del Usuario Autenticado
 exports.getProfile = async (req, res) => {
   try {
     const result = await db.query(
