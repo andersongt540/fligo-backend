@@ -9,6 +9,8 @@ router.use(verificarToken);
 router.get('/', suscripcionController.obtenerSuscripcion);
 router.post('/solicitudes', autorizarRoles('OWNER'), suscripcionController.crearSolicitud);
 router.get('/admin/solicitudes', verificarAdminSuscripciones, suscripcionController.listarSolicitudesPendientes);
+router.get('/admin/empresas', verificarAdminSuscripciones, suscripcionController.listarEmpresasPlataforma);
+router.post('/admin/empresas/:tenantId/renovar', verificarAdminSuscripciones, suscripcionController.renovarSuscripcionEmpresa);
 router.post('/admin/solicitudes/:id/revisar', verificarAdminSuscripciones, suscripcionController.revisarSolicitud);
 
 module.exports = router;

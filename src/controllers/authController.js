@@ -236,10 +236,15 @@ exports.getProfile = async (req, res) => {
 
     const profile = result.rows[0];
     const suscripcion = estadoSuscripcion(profile);
+    const esAdminPlataforma = profile.rol === 'SUPERADMIN'
+      || (profile.rol === 'OWNER'
+        && process.env.FLIGO_PLATFORM_TENANT_ID
+        && process.env.FLIGO_PLATFORM_TENANT_ID === profile.tenant_id);
     res.json({
       success: true,
       data: {
         ...profile,
+        es_admin_plataforma: Boolean(esAdminPlataforma),
         estado_suscripcion: suscripcion.estado,
         dias_suscripcion: suscripcion.dias_restantes
       }

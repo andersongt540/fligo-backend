@@ -180,6 +180,99 @@ exports.listarSolicitudesPendientes = async (req, res) => {
   }
 };
 
+exports.listarEmpresasPlataforma = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT t.id, t.nombre_empresa, t.plan, t.activo, t.creado_en,
+              t.prueba_hasta, t.suscripcion_hasta,
+              CASE
+                WHEN t.suscripcion_hasta > CURRENT_TIMESTAMP THEN 'ACTIVA'
+                WHEN t.prueba_hasta > CURRENT_TIMESTAMP THEN 'PRUEBA'
+                ELSE 'VENCIDA'
+              END AS estado_suscripcion,
+              GREATEST(
+                0,
+                CEIL(EXTRACT(EPOCH FROM (
+                  CASE
+                    WHEN t.suscripcion_hasta > CURRENT_TIMESTAMP THEN t.suscripcion_hasta
+                    WHEN t.prueba_hasta > CURRENT_TIMESTAMP THEN t.prueba_hasta
+                    ELSE CURRENT_TIMESTAMP
+                  END - CURRENT_TIMESTAMP
+                )) / 86400)::INTEGER
+              ) AS dias_restantes,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'id', u.id,
+                  'nombre', u.nombre,
+                  'email', u.email,
+                  'rol', u.rol,
+                  'activo', u.activo,
+                  'sucursal', ti.nombre
+                ) ORDER BY u.creado_en)
+                FROM usuarios u
+                LEFT JOIN tiendas ti ON ti.id = u.tienda_id
+                WHERE u.tenant_id = t.id
+              ), '[]'::json) AS cuentas,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'id', ti.id,
+                  'nombre', ti.nombre,
+                  'activa', ti.activa,
+                  'direccion', ti.direccion,
+                  'telefono', ti.telefono
+                ) ORDER BY ti.creado_en)
+                FROM tiendas ti
+                WHERE ti.tenant_id = t.id
+              ), '[]'::json) AS sucursales
+       FROM tenants t
+       ORDER BY t.creado_en DESC`
+    );
+    return res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error en listarEmpresasPlataforma [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudieron cargar las empresas de la plataforma.' });
+  }
+};
+
+exports.renovarSuscripcionEmpresa = async (req, res) => {
+  const { plan } = req.body;
+  const oferta = PLANES[plan];
+  if (!oferta) {
+    return res.status(400).json({ success: false, error: 'Selecciona un plan válido para renovar.' });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `UPDATE tenants
+       SET plan = $1,
+           prueba_hasta = NULL,
+           suscripcion_hasta = GREATEST(COALESCE(suscripcion_hasta, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+             + ($2 * INTERVAL '1 day')
+       WHERE id = $3
+       RETURNING id, nombre_empresa, plan, prueba_hasta, suscripcion_hasta`,
+      [plan, oferta.dias, req.params.tenantId]
+    );
+    if (!result.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'No se encontró la empresa que quieres renovar.' });
+    }
+    await client.query('COMMIT');
+    return res.json({
+      success: true,
+      message: `Suscripción renovada por ${oferta.dias} ${oferta.dias === 1 ? 'día' : 'días'}.`,
+      data: { ...result.rows[0], ...estadoSuscripcion(result.rows[0]) }
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en renovarSuscripcionEmpresa [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo renovar la suscripción de la empresa.' });
+  } finally {
+    client.release();
+  }
+};
+
 exports.revisarSolicitud = async (req, res) => {
   const { estado, comentario } = req.body;
   if (!['APROBADA', 'RECHAZADA'].includes(estado)) {
