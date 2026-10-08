@@ -41,14 +41,18 @@ The content is organized as follows:
 
 <directory_structure>
 docs/
+  AUTENTICACION_FIREBASE.md
   SUSCRIPCIONES.md
 migrations/
   001_suscripciones.sql
+  002_prueba_suscripcion.sql
+  003_firebase_auth.sql
 src/
   certs/
     sectigo-public-server-authentication-ca-dv-r36.pem
   config/
     db.js
+    firebaseTokenVerifier.js
   controllers/
     authController.js
     clienteController.js
@@ -72,6 +76,8 @@ src/
     reporteRoutes.js
     suscripcionRoutes.js
     ventaRoutes.js
+  utils/
+    suscripcion.js
   app.js
 .gitattributes
 database.sql
@@ -114,6 +120,25 @@ CREATE INDEX IF NOT EXISTS idx_suscripciones_estado_fecha
 
 CREATE INDEX IF NOT EXISTS idx_suscripciones_tenant_fecha
   ON solicitudes_suscripcion (tenant_id, creado_en DESC);
+</file>
+
+<file path="migrations/002_prueba_suscripcion.sql">
+ALTER TABLE tenants
+  ADD COLUMN IF NOT EXISTS prueba_hasta TIMESTAMPTZ;
+
+UPDATE tenants
+SET prueba_hasta = CURRENT_TIMESTAMP + INTERVAL '7 days'
+WHERE prueba_hasta IS NULL
+  AND (suscripcion_hasta IS NULL OR suscripcion_hasta <= CURRENT_TIMESTAMP);
+</file>
+
+<file path="migrations/003_firebase_auth.sql">
+ALTER TABLE usuarios
+  ADD COLUMN IF NOT EXISTS firebase_uid VARCHAR(128);
+
+CREATE UNIQUE INDEX IF NOT EXISTS usuarios_firebase_uid_unique
+  ON usuarios (firebase_uid)
+  WHERE firebase_uid IS NOT NULL;
 </file>
 
 <file path="src/certs/sectigo-public-server-authentication-ca-dv-r36.pem">
@@ -180,236 +205,14 @@ module.exports = {
 };
 </file>
 
-<file path="src/controllers/authController.js">
-const db = require('../config/db');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+<file path="src/config/firebaseTokenVerifier.js">
+const { initializeApp } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
 
-// 1. Registro de Empresa e Inicio en Fligo (Onboarding)
-exports.registerTenant = async (req, res) => {
-  const { nombre_empresa, nombre_usuario, email, password } = req.body;
+const app = initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'fliigo' });
 
-  if (!nombre_empresa || !nombre_usuario || !email || !password) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Todos los campos son obligatorios para crear tu cuenta en Fligo.' 
-    });
-  }
-
-  const client = await db.pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    // Verificar si el usuario ya está registrado en Fligo
-    const existingUser = await client.query('SELECT id FROM usuarios WHERE email = $1', [email]);
-    if (existingUser.rows.length > 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        success: false, 
-        error: 'El correo electrónico ya está registrado en Fligo.' 
-      });
-    }
-
-    // Crear Empresa / Inquilino en Fligo
-    const tenantRes = await client.query(
-      'INSERT INTO tenants (nombre_empresa) VALUES ($1) RETURNING id, nombre_empresa, plan',
-      [nombre_empresa]
-    );
-    const newTenant = tenantRes.rows[0];
-
-    // Crear la Sucursal / Tienda Principal inicial
-    const tiendaRes = await client.query(
-      'INSERT INTO tiendas (tenant_id, nombre) VALUES ($1, $2) RETURNING id, nombre',
-      [newTenant.id, 'Sucursal Principal']
-    );
-    const newTienda = tiendaRes.rows[0];
-
-    // Cifrar contraseña y crear el usuario OWNER
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
-
-    const userRes = await client.query(
-      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol) 
-       VALUES ($1, $2, $3, $4, $5, 'OWNER') RETURNING id, nombre, email, rol`,
-      [newTenant.id, newTienda.id, nombre_usuario, email, passwordHash]
-    );
-
-    await client.query('COMMIT');
-
-    // Generar Token JWT de Fligo
-    const token = jwt.sign(
-      {
-        user_id: userRes.rows[0].id,
-        tenant_id: newTenant.id,
-        tienda_id: newTienda.id,
-        rol: 'OWNER'
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
-
-    res.status(201).json({
-      success: true,
-      message: '¡Bienvenido a Fligo! Empresa y cuenta creadas con éxito.',
-      data: {
-        token,
-        usuario: userRes.rows[0],
-        empresa: newTenant,
-        tienda: newTienda
-      }
-    });
-
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Error en registerTenant [Fligo]:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Error interno del servidor al registrar la cuenta en Fligo.' 
-    });
-  } finally {
-    client.release();
-  }
-};
-
-// 2. Inicio de Sesión
-exports.login = async (req, res) => {
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Por favor ingresa tu correo y contraseña.' 
-    });
-  }
-
-  try {
-    const result = await db.query(
-      `SELECT u.id, u.tenant_id, u.tienda_id, u.nombre, u.email, u.password_hash, u.rol, u.activo,
-              t.nombre_empresa 
-       FROM usuarios u
-       JOIN tenants t ON u.tenant_id = t.id
-       WHERE u.email = $1`,
-      [email]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Credenciales inválidas en Fligo.' });
-    }
-
-    const usuario = result.rows[0];
-
-    if (!usuario.activo) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'Tu usuario en Fligo se encuentra inactivo. Contacta a tu administrador.' 
-      });
-    }
-
-    const passwordValido = await bcrypt.compare(password, usuario.password_hash);
-    if (!passwordValido) {
-      return res.status(401).json({ success: false, error: 'Credenciales inválidas en Fligo.' });
-    }
-
-    // Generar Token JWT firmado
-    const token = jwt.sign(
-      {
-        user_id: usuario.id,
-        tenant_id: usuario.tenant_id,
-        tienda_id: usuario.tienda_id,
-        rol: usuario.rol
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Inicio de sesión exitoso en Fligo.',
-      data: {
-        token,
-        usuario: {
-          id: usuario.id,
-          nombre: usuario.nombre,
-          email: usuario.email,
-          rol: usuario.rol,
-          tenant_id: usuario.tenant_id,
-          tienda_id: usuario.tienda_id,
-          empresa: usuario.nombre_empresa
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error('Error en login [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error interno del servidor al iniciar sesión.' });
-  }
-};
-
-// 3. Crear Empleado (Solo OWNER o MANAGER del Tenant)
-exports.createEmpleado = async (req, res) => {
-  const { nombre, email, password, rol, tienda_id } = req.body;
-  const tenant_id = req.user.tenant_id; // Garantiza que no se crucen datos entre empresas
-
-  if (!nombre || !email || !password || !rol) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Todos los campos obligatorios deben ser proporcionados.' 
-    });
-  }
-
-  try {
-    const checkUser = await db.query('SELECT id FROM usuarios WHERE email = $1', [email]);
-    if (checkUser.rows.length > 0) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'El correo electrónico ya está registrado en Fligo.' 
-      });
-    }
-
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
-
-    const result = await db.query(
-      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, nombre, email, rol, tienda_id, creado_en`,
-      [tenant_id, tienda_id || null, nombre, email, passwordHash, rol]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Empleado registrado exitosamente en tu equipo de Fligo.',
-      data: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Error en createEmpleado [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al registrar el empleado.' });
-  }
-};
-
-// 4. Obtener Perfil del Usuario Autenticado
-exports.getProfile = async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT u.id, u.nombre, u.email, u.rol, u.tenant_id, u.tienda_id, t.nombre_empresa, s.nombre as nombre_tienda
-       FROM usuarios u
-       JOIN tenants t ON u.tenant_id = t.id
-       LEFT JOIN tiendas s ON u.tienda_id = s.id
-       WHERE u.id = $1`,
-      [req.user.user_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Usuario de Fligo no encontrado.' });
-    }
-
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error('Error en getProfile [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al obtener datos del perfil.' });
-  }
+module.exports = {
+  verifyIdToken: idToken => getAuth(app).verifyIdToken(idToken)
 };
 </file>
 
@@ -1037,288 +840,6 @@ exports.obtenerRankingVendedores = async (req, res) => {
 };
 </file>
 
-<file path="src/controllers/suscripcionController.js">
-const db = require('../config/db');
-const { obtenerDatosTasasBcv } = require('./configuracionController');
-
-const PLANES = Object.freeze({
-  diaria: { nombre: 'Diaria', precio_usd: 3, dias: 1 },
-  semanal: { nombre: 'Semanal', precio_usd: 7, dias: 7 },
-  mensual: { nombre: 'Mensual', precio_usd: 20, dias: 30 }
-});
-
-function pagoMovilDestino() {
-  return {
-    banco: process.env.PAGO_MOVIL_BANCO || '',
-    telefono: process.env.PAGO_MOVIL_TELEFONO || '',
-    documento: process.env.PAGO_MOVIL_DOCUMENTO || '',
-    titular: process.env.PAGO_MOVIL_TITULAR || ''
-  };
-}
-
-function destinoConfigurado(destino) {
-  return Boolean(destino.banco && destino.telefono && destino.documento);
-}
-
-exports.obtenerSuscripcion = async (req, res) => {
-  try {
-    let tasaBcv = null;
-    let errorTasa = null;
-    try {
-      tasaBcv = await obtenerDatosTasasBcv();
-    } catch (error) {
-      errorTasa = 'No se pudo consultar la tasa del BCV. Intenta actualizar más tarde.';
-      console.error('Error en obtenerSuscripcion [BCV]:', error);
-    }
-
-    const [tenantResult, requestsResult] = await Promise.all([
-      db.query(
-        'SELECT plan, suscripcion_hasta FROM tenants WHERE id = $1',
-        [req.user.tenant_id]
-      ),
-      db.query(
-        `SELECT id, plan, precio_usd, tasa_bcv, monto_bs, referencia_pago, fecha_pago,
-                estado, comentario_revision, creado_en, revisado_en
-         FROM solicitudes_suscripcion
-         WHERE tenant_id = $1
-         ORDER BY creado_en DESC
-         LIMIT 10`,
-        [req.user.tenant_id]
-      )
-    ]);
-
-    if (!tenantResult.rows.length) {
-      return res.status(404).json({ success: false, error: 'Empresa no encontrada.' });
-    }
-
-    const destino = pagoMovilDestino();
-    return res.json({
-      success: true,
-      data: {
-        planes: Object.entries(PLANES).map(([id, plan]) => ({ id, ...plan })),
-        tasa_bcv: tasaBcv,
-        error_tasa: errorTasa,
-        pago_movil: { destino, configurado: destinoConfigurado(destino) },
-        es_admin_plataforma: req.user.rol === 'SUPERADMIN'
-          || (req.user.rol === 'OWNER' && process.env.FLIGO_PLATFORM_TENANT_ID === req.user.tenant_id),
-        suscripcion: tenantResult.rows[0],
-        solicitudes: requestsResult.rows
-      }
-    });
-  } catch (error) {
-    console.error('Error en obtenerSuscripcion [Fligo]:', error);
-    return res.status(500).json({ success: false, error: 'No se pudo cargar el módulo de suscripciones.' });
-  }
-};
-
-exports.crearSolicitud = async (req, res) => {
-  const { plan, telefono, documento, monto_bs, referencia_pago, fecha_pago } = req.body;
-  const oferta = PLANES[plan];
-
-  if (!oferta) {
-    return res.status(400).json({ success: false, error: 'Selecciona un plan válido.' });
-  }
-  if (typeof telefono !== 'string' || !/^[+\d\s().-]{7,24}$/.test(telefono.trim())) {
-    return res.status(400).json({ success: false, error: 'Ingresa un teléfono válido.' });
-  }
-  if (typeof documento !== 'string' || !/^[VEJPG]?[-\s]?\d{5,12}$/i.test(documento.trim())) {
-    return res.status(400).json({ success: false, error: 'Ingresa una cédula o documento válido.' });
-  }
-  if (typeof referencia_pago !== 'string' || !/^[a-z0-9-]{4,24}$/i.test(referencia_pago.trim())) {
-    return res.status(400).json({ success: false, error: 'La referencia debe tener entre 4 y 24 caracteres alfanuméricos.' });
-  }
-  if (typeof fecha_pago !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha_pago)
-    || Number.isNaN(Date.parse(`${fecha_pago}T00:00:00Z`))
-    || new Date(`${fecha_pago}T00:00:00Z`).toISOString().slice(0, 10) !== fecha_pago) {
-    return res.status(400).json({ success: false, error: 'Ingresa la fecha del Pago Móvil.' });
-  }
-  if (!Number.isFinite(Number(monto_bs)) || Number(monto_bs) <= 0) {
-    return res.status(400).json({ success: false, error: 'Ingresa un monto válido en bolívares.' });
-  }
-
-  const destino = pagoMovilDestino();
-  if (!destinoConfigurado(destino)) {
-    return res.status(503).json({ success: false, error: 'Fligo aún no ha configurado los datos para recibir pagos. Intenta más tarde.' });
-  }
-
-  let tasas;
-  try {
-    tasas = await obtenerDatosTasasBcv();
-  } catch (error) {
-    console.error('Error en crearSolicitudSuscripcion [BCV]:', error);
-    return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa del BCV para validar el monto. Intenta más tarde.' });
-  }
-
-  const montoEsperadoCentimos = Math.round(oferta.precio_usd * tasas.usd_ves * 100);
-  const montoEnviadoCentimos = Math.round(Number(monto_bs) * 100);
-  if (montoEsperadoCentimos !== montoEnviadoCentimos) {
-    return res.status(400).json({
-      success: false,
-      error: `El monto no coincide con el precio del plan a la tasa BCV actual (${(montoEsperadoCentimos / 100).toFixed(2)} Bs.). Actualiza la tasa y confirma el pago.`
-    });
-  }
-
-  try {
-    const result = await db.query(
-      `INSERT INTO solicitudes_suscripcion
-         (tenant_id, plan, precio_usd, tasa_bcv, monto_bs, telefono_pagador, documento_pagador, referencia_pago, fecha_pago)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id, plan, precio_usd, tasa_bcv, monto_bs, referencia_pago, fecha_pago, estado, creado_en`,
-      [
-        req.user.tenant_id,
-        plan,
-        oferta.precio_usd,
-        tasas.usd_ves,
-        montoEsperadoCentimos / 100,
-        telefono.trim(),
-        documento.trim().toUpperCase(),
-        referencia_pago.trim(),
-        fecha_pago
-      ]
-    );
-    return res.status(201).json({
-      success: true,
-      message: 'Solicitud enviada. La suscripción se activará cuando se verifique el pago.',
-      data: result.rows[0]
-    });
-  } catch (error) {
-    if (error.code === '23505') {
-      return res.status(409).json({ success: false, error: 'Ya existe una solicitud pendiente para tu empresa o esa referencia de pago ya fue enviada.' });
-    }
-    console.error('Error en crearSolicitudSuscripcion [Fligo]:', error);
-    return res.status(500).json({ success: false, error: 'No se pudo enviar la solicitud de pago.' });
-  }
-};
-
-exports.listarSolicitudesPendientes = async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT s.id, s.tenant_id, t.nombre_empresa, s.plan, s.precio_usd, s.tasa_bcv,
-              s.monto_bs, s.telefono_pagador, s.documento_pagador, s.referencia_pago,
-              s.fecha_pago, s.creado_en, u.nombre AS nombre_solicitante, u.email AS email_solicitante
-       FROM solicitudes_suscripcion s
-       JOIN tenants t ON t.id = s.tenant_id
-       LEFT JOIN LATERAL (
-         SELECT nombre, email
-         FROM usuarios
-         WHERE tenant_id = t.id AND rol = 'OWNER'
-         ORDER BY creado_en ASC
-         LIMIT 1
-       ) u ON TRUE
-       WHERE s.estado = 'PENDIENTE'
-       ORDER BY s.creado_en ASC
-       LIMIT 100`
-    );
-    return res.json({ success: true, data: result.rows });
-  } catch (error) {
-    console.error('Error en listarSolicitudesPendientes [Fligo]:', error);
-    return res.status(500).json({ success: false, error: 'No se pudieron cargar las solicitudes pendientes.' });
-  }
-};
-
-exports.revisarSolicitud = async (req, res) => {
-  const { estado, comentario } = req.body;
-  if (!['APROBADA', 'RECHAZADA'].includes(estado)) {
-    return res.status(400).json({ success: false, error: 'La revisión debe aprobar o rechazar la solicitud.' });
-  }
-  if (comentario !== undefined && (typeof comentario !== 'string' || comentario.length > 500)) {
-    return res.status(400).json({ success: false, error: 'El comentario no puede superar 500 caracteres.' });
-  }
-
-  const client = await db.pool.connect();
-  try {
-    await client.query('BEGIN');
-    const requestResult = await client.query(
-      `SELECT id, tenant_id, plan
-       FROM solicitudes_suscripcion
-       WHERE id = $1 AND estado = 'PENDIENTE'
-       FOR UPDATE`,
-      [req.params.id]
-    );
-    if (!requestResult.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ success: false, error: 'La solicitud no existe o ya fue revisada.' });
-    }
-    const request = requestResult.rows[0];
-
-    if (estado === 'APROBADA') {
-      const duracionDias = PLANES[request.plan]?.dias;
-      if (!duracionDias) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'El plan de esta solicitud ya no está disponible.' });
-      }
-      await client.query(
-        `UPDATE tenants
-         SET plan = $1,
-             suscripcion_hasta = GREATEST(COALESCE(suscripcion_hasta, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP) + ($2 * INTERVAL '1 day')
-         WHERE id = $3`,
-        [request.plan, duracionDias, request.tenant_id]
-      );
-    }
-
-    const updated = await client.query(
-      `UPDATE solicitudes_suscripcion
-       SET estado = $1, comentario_revision = $2, revisada_por = $3, revisado_en = CURRENT_TIMESTAMP
-       WHERE id = $4
-       RETURNING id, tenant_id, plan, estado, revisado_en`,
-      [estado, comentario?.trim() || null, req.user.user_id, request.id]
-    );
-    await client.query('COMMIT');
-    return res.json({ success: true, data: updated.rows[0] });
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Error en revisarSolicitudSuscripcion [Fligo]:', error);
-    return res.status(500).json({ success: false, error: 'No se pudo revisar la solicitud.' });
-  } finally {
-    client.release();
-  }
-};
-</file>
-
-<file path="src/middlewares/authMiddleware.js">
-const jwt = require('jsonwebtoken');
-
-const verificarToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Formato: Bearer <TOKEN>
-
-  if (!token) {
-    return res.status(401).json({ 
-      success: false, 
-      error: 'Acceso denegado a Fligo. Token de autenticación no proporcionado.' 
-    });
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // Inyecta { user_id, tenant_id, tienda_id, rol }
-    next();
-  } catch (err) {
-    return res.status(403).json({ 
-      success: false, 
-      error: 'Sesión en Fligo inválida o expirada. Inicie sesión nuevamente.' 
-    });
-  }
-};
-
-const autorizarRoles = (...rolesPermitidos) => {
-  return (req, res, next) => {
-    if (!req.user || !rolesPermitidos.includes(req.user.rol)) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'No tienes permisos suficientes en Fligo para realizar esta acción.' 
-      });
-    }
-    next();
-  };
-};
-
-module.exports = {
-  verificarToken,
-  autorizarRoles
-};
-</file>
-
 <file path="src/middlewares/verificarAdminSuscripciones.js">
 module.exports = (req, res, next) => {
   const platformTenantId = process.env.FLIGO_PLATFORM_TENANT_ID;
@@ -1335,23 +856,6 @@ module.exports = (req, res, next) => {
   }
   next();
 };
-</file>
-
-<file path="src/routes/authRoutes.js">
-const express = require('express');
-const router = express.Router();
-const authController = require('../controllers/authController');
-const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
-
-// Rutas Públicas de Autenticación
-router.post('/register-tenant', authController.registerTenant);
-router.post('/login', authController.login);
-
-// Rutas Protegidas en Fligo
-router.get('/profile', verificarToken, authController.getProfile);
-router.post('/empleados', verificarToken, autorizarRoles('OWNER', 'MANAGER'), authController.createEmpleado);
-
-module.exports = router;
 </file>
 
 <file path="src/routes/clienteRoutes.js">
@@ -1435,6 +939,145 @@ router.get('/vendedores', autorizarRoles('OWNER', 'MANAGER'), reporteController.
 module.exports = router;
 </file>
 
+<file path="src/utils/suscripcion.js">
+const DAY_IN_MILLISECONDS = 24 * 60 * 60 * 1000;
+
+function estadoSuscripcion({ prueba_hasta, suscripcion_hasta }, now = new Date()) {
+  const trialEnd = prueba_hasta ? new Date(prueba_hasta) : null;
+  const subscriptionEnd = suscripcion_hasta ? new Date(suscripcion_hasta) : null;
+  const paidActive = subscriptionEnd && subscriptionEnd > now;
+  const trialActive = trialEnd && trialEnd > now;
+  const fechaHasta = paidActive ? subscriptionEnd : trialActive ? trialEnd : null;
+
+  return {
+    estado: paidActive ? 'ACTIVA' : trialActive ? 'PRUEBA' : 'VENCIDA',
+    dias_restantes: fechaHasta
+      ? Math.max(0, Math.ceil((fechaHasta.getTime() - now.getTime()) / DAY_IN_MILLISECONDS))
+      : 0,
+    prueba_hasta: prueba_hasta || null,
+    suscripcion_hasta: suscripcion_hasta || null
+  };
+}
+
+module.exports = { estadoSuscripcion };
+</file>
+
+<file path=".gitattributes">
+# Auto detect text files and perform LF normalization
+* text=auto
+</file>
+
+<file path="src/middlewares/authMiddleware.js">
+const jwt = require('jsonwebtoken');
+const db = require('../config/db');
+
+const verificarToken = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Formato: Bearer <TOKEN>
+
+  if (!token) {
+    return res.status(401).json({ 
+      success: false, 
+      error: 'Acceso denegado a Fligo. Token de autenticación no proporcionado.' 
+    });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded; // Inyecta { user_id, tenant_id, tienda_id, rol }
+
+    const isPlatformAdmin = decoded.rol === 'SUPERADMIN'
+      || (decoded.rol === 'OWNER'
+        && process.env.FLIGO_PLATFORM_TENANT_ID
+        && process.env.FLIGO_PLATFORM_TENANT_ID === decoded.tenant_id);
+    const canManageExpiredSubscription = req.baseUrl === '/api/suscripciones'
+      || (req.baseUrl === '/api/auth' && req.path === '/profile');
+    if (isPlatformAdmin || canManageExpiredSubscription) return next();
+
+    const subscription = await db.query(
+      `SELECT prueba_hasta, suscripcion_hasta,
+              (prueba_hasta > CURRENT_TIMESTAMP OR suscripcion_hasta > CURRENT_TIMESTAMP) AS acceso_activo
+       FROM tenants
+       WHERE id = $1`,
+      [decoded.tenant_id]
+    );
+    if (!subscription.rows.length) {
+      return res.status(403).json({ success: false, error: 'La empresa asociada a esta cuenta ya no está disponible.' });
+    }
+    if (!subscription.rows[0].acceso_activo) {
+      return res.status(402).json({
+        success: false,
+        error: 'La prueba o suscripción venció. Activa un plan desde Suscripciones para recuperar el acceso.'
+      });
+    }
+    next();
+  } catch (err) {
+    if (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError' || err.name === 'NotBeforeError') {
+      return res.status(403).json({
+        success: false,
+        error: 'Sesión en Fligo inválida o expirada. Inicie sesión nuevamente.'
+      });
+    }
+    console.error('Error al validar acceso de suscripción [Fligo]:', err);
+    return next(err);
+  }
+};
+
+const autorizarRoles = (...rolesPermitidos) => {
+  return (req, res, next) => {
+    if (!req.user || !rolesPermitidos.includes(req.user.rol)) {
+      return res.status(403).json({ 
+        success: false, 
+        error: 'No tienes permisos suficientes en Fligo para realizar esta acción.' 
+      });
+    }
+    next();
+  };
+};
+
+module.exports = {
+  verificarToken,
+  autorizarRoles
+};
+</file>
+
+<file path="src/routes/authRoutes.js">
+const express = require('express');
+const router = express.Router();
+const authController = require('../controllers/authController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+// Firebase verifies the identity; Fligo provisions and authorizes the local account.
+router.post('/firebase-session', authController.firebaseSession);
+router.post('/migrate-legacy', authController.migrateLegacyAccount);
+
+// Rutas Protegidas en Fligo
+router.get('/profile', verificarToken, authController.getProfile);
+router.post('/empleados', verificarToken, autorizarRoles('OWNER', 'MANAGER'), authController.createEmpleado);
+
+module.exports = router;
+</file>
+
+<file path="src/routes/configuracionRoutes.js">
+const express = require('express');
+const router = express.Router();
+const configuracionController = require('../controllers/configuracionController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+// Configuración general de la empresa
+router.get('/tasas-bcv', configuracionController.obtenerTasasBcv);
+router.get('/', configuracionController.obtenerConfiguracion);
+router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
+
+// Gestión de Tiendas / Sucursales
+router.get('/tiendas', configuracionController.obtenerTiendas);
+router.post('/tiendas', autorizarRoles('OWNER'), configuracionController.crearTienda);
+
+module.exports = router;
+</file>
+
 <file path="src/routes/suscripcionRoutes.js">
 const express = require('express');
 const suscripcionController = require('../controllers/suscripcionController');
@@ -1447,6 +1090,8 @@ router.use(verificarToken);
 router.get('/', suscripcionController.obtenerSuscripcion);
 router.post('/solicitudes', autorizarRoles('OWNER'), suscripcionController.crearSolicitud);
 router.get('/admin/solicitudes', verificarAdminSuscripciones, suscripcionController.listarSolicitudesPendientes);
+router.get('/admin/empresas', verificarAdminSuscripciones, suscripcionController.listarEmpresasPlataforma);
+router.post('/admin/empresas/:tenantId/renovar', verificarAdminSuscripciones, suscripcionController.renovarSuscripcionEmpresa);
 router.post('/admin/solicitudes/:id/revisar', verificarAdminSuscripciones, suscripcionController.revisarSolicitud);
 
 module.exports = router;
@@ -1465,14 +1110,80 @@ router.post('/ventas', ventaController.registrarVenta);
 router.get('/ventas', ventaController.obtenerVentas);
 
 // Cotizaciones / Presupuestos
+router.get('/cotizaciones', ventaController.obtenerCotizaciones);
 router.post('/cotizaciones', ventaController.crearCotizacion);
+router.put('/cotizaciones/:id/estado', ventaController.actualizarEstadoCotizacion);
 
 module.exports = router;
 </file>
 
-<file path=".gitattributes">
-# Auto detect text files and perform LF normalization
-* text=auto
+<file path="src/app.js">
+const express = require('express');
+const cors = require('cors');
+require('dotenv').config();
+
+// Importación de Rutas de Todos los Módulos de Fligo
+const authRoutes = require('./routes/authRoutes');
+const clienteRoutes = require('./routes/clienteRoutes');
+const productoRoutes = require('./routes/productoRoutes');
+const ventaRoutes = require('./routes/ventaRoutes');
+const reporteRoutes = require('./routes/reporteRoutes');
+const leadRoutes = require('./routes/leadRoutes');
+const comunicacionRoutes = require('./routes/comunicacionRoutes');
+const configuracionRoutes = require('./routes/configuracionRoutes');
+const suscripcionRoutes = require('./routes/suscripcionRoutes');
+
+const app = express();
+
+// Middlewares Globales
+app.use(cors());
+app.use(express.json());
+
+// Endpoint de Diagnóstico y Salud de la API
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    app: 'Fligo Engine API', 
+    status: 'ONLINE', 
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date() 
+  });
+});
+
+// Registro de Rutas Mapeadas por Módulo en Fligo
+app.use('/api/auth', authRoutes);
+app.use('/api/clientes', clienteRoutes);
+app.use('/api/productos', productoRoutes);
+app.use('/api/reportes', reporteRoutes);
+app.use('/api/leads', leadRoutes);
+app.use('/api/comunicaciones', comunicacionRoutes);
+app.use('/api/configuracion', configuracionRoutes);
+app.use('/api/suscripciones', suscripcionRoutes);
+app.use('/api', ventaRoutes);
+
+// Manejo de Rutas Inexistentes (404)
+app.use((req, res) => {
+  res.status(404).json({ 
+    success: false, 
+    error: 'Ruta no encontrada en Fligo API.' 
+  });
+});
+
+// Manejo Global de Errores (500)
+app.use((err, req, res, next) => {
+  console.error('❌ [Fligo Internal Error]:', err.stack);
+  res.status(500).json({
+    success: false,
+    error: 'Error interno del servidor en Fligo API.'
+  });
+});
+
+const PORT = process.env.PORT || 10000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 [Fligo Engine] Servidor iniciado correctamente en el puerto ${PORT}`);
+});
+
+module.exports = app;
 </file>
 
 <file path="database.sql">
@@ -1487,6 +1198,7 @@ CREATE TABLE tenants (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     nombre_empresa VARCHAR(150) NOT NULL,
     plan VARCHAR(50) DEFAULT 'basic',
+    prueba_hasta TIMESTAMPTZ,
     activo BOOLEAN DEFAULT TRUE,
     creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -1725,7 +1437,7 @@ CREATE INDEX idx_usuarios_tienda ON usuarios(tienda_id);
 
 Antes de usar el módulo:
 
-1. Ejecuta `migrations/001_suscripciones.sql` una sola vez en la base PostgreSQL de Render.
+1. Ejecuta `migrations/001_suscripciones.sql` y luego `migrations/002_prueba_suscripcion.sql` una sola vez en la base PostgreSQL de Render.
 2. En las variables de entorno del servicio backend configura los datos de recepción de Pago Móvil:
    - `PAGO_MOVIL_BANCO`
    - `PAGO_MOVIL_TELEFONO`
@@ -1746,128 +1458,17 @@ No guardes estos valores en Firebase ni en los archivos del frontend.
 ## Flujo
 
 - Los planes son diaria (USD 3 por 1 día), semanal (USD 7 por 7 días) y mensual (USD 20 por 30 días).
+- Cada empresa nueva recibe una prueba de 7 días desde su registro. Las empresas existentes sin una suscripción vigente reciben una transición única de 7 días al ejecutar la migración `002_prueba_suscripcion.sql`.
+- El inicio de sesión informa el estado y los días restantes. El frontend avisa en cada inicio mientras la empresa está en prueba y recuerda renovar cuando una suscripción pagada tenga 7 días o menos.
 - El backend consulta la tasa USD del BCV, calcula el monto en bolívares y compara el monto reportado con el importe esperado en el momento de enviar la solicitud.
 - El titular informa teléfono, documento del pagador, monto, referencia y fecha. No se solicita ni almacena ninguna clave bancaria.
 - En el formulario, el botón verde «Reportar pago» registra la solicitud pendiente y abre WhatsApp con un mensaje preparado que incluye empresa, plan, monto, fecha y referencia. El usuario debe revisar y enviar ese mensaje desde WhatsApp.
 - La solicitud queda `PENDIENTE`. Un usuario administrativo verifica el abono en Mercantil y la aprueba o rechaza desde Fligo.
-- Al aprobar, el plan y la fecha de vencimiento del tenant se actualizan. La duración aprobada se suma al vencimiento vigente si la suscripción aún no ha expirado.
+- Al aprobar, el plan y la fecha de vencimiento del tenant se actualizan y se cierra la prueba. La duración aprobada se suma al vencimiento vigente si la suscripción aún no ha expirado.
 
 La cuenta personal de Pago Móvil no expone una confirmación automática al backend. Por ello, este flujo no activa pagos por sí solo: la aprobación manual es necesaria hasta contratar una cuenta/API de cobros que permita verificar abonos de manera segura.
 
-El módulo registra la fecha de vencimiento, pero no bloquea actualmente el acceso de una empresa vencida. La aplicación de restricciones requiere definir primero qué acceso conservar para las empresas existentes y sus datos.
-</file>
-
-<file path="src/routes/configuracionRoutes.js">
-const express = require('express');
-const router = express.Router();
-const configuracionController = require('../controllers/configuracionController');
-const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
-
-router.use(verificarToken);
-
-// Configuración general de la empresa
-router.get('/tasas-bcv', configuracionController.obtenerTasasBcv);
-router.get('/', configuracionController.obtenerConfiguracion);
-router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
-
-// Gestión de Tiendas / Sucursales
-router.get('/tiendas', configuracionController.obtenerTiendas);
-router.post('/tiendas', autorizarRoles('OWNER'), configuracionController.crearTienda);
-
-module.exports = router;
-</file>
-
-<file path="src/app.js">
-const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
-
-// Importación de Rutas de Todos los Módulos de Fligo
-const authRoutes = require('./routes/authRoutes');
-const clienteRoutes = require('./routes/clienteRoutes');
-const productoRoutes = require('./routes/productoRoutes');
-const ventaRoutes = require('./routes/ventaRoutes');
-const reporteRoutes = require('./routes/reporteRoutes');
-const leadRoutes = require('./routes/leadRoutes');
-const comunicacionRoutes = require('./routes/comunicacionRoutes');
-const configuracionRoutes = require('./routes/configuracionRoutes');
-const suscripcionRoutes = require('./routes/suscripcionRoutes');
-
-const app = express();
-
-// Middlewares Globales
-app.use(cors());
-app.use(express.json());
-
-// Endpoint de Diagnóstico y Salud de la API
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    app: 'Fligo Engine API', 
-    status: 'ONLINE', 
-    environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date() 
-  });
-});
-
-// Registro de Rutas Mapeadas por Módulo en Fligo
-app.use('/api/auth', authRoutes);
-app.use('/api/clientes', clienteRoutes);
-app.use('/api/productos', productoRoutes);
-app.use('/api/reportes', reporteRoutes);
-app.use('/api/leads', leadRoutes);
-app.use('/api/comunicaciones', comunicacionRoutes);
-app.use('/api/configuracion', configuracionRoutes);
-app.use('/api/suscripciones', suscripcionRoutes);
-app.use('/api', ventaRoutes);
-
-// Manejo de Rutas Inexistentes (404)
-app.use((req, res) => {
-  res.status(404).json({ 
-    success: false, 
-    error: 'Ruta no encontrada en Fligo API.' 
-  });
-});
-
-// Manejo Global de Errores (500)
-app.use((err, req, res, next) => {
-  console.error('❌ [Fligo Internal Error]:', err.stack);
-  res.status(500).json({
-    success: false,
-    error: 'Error interno del servidor en Fligo API.'
-  });
-});
-
-const PORT = process.env.PORT || 10000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 [Fligo Engine] Servidor iniciado correctamente en el puerto ${PORT}`);
-});
-
-module.exports = app;
-</file>
-
-<file path="package.json">
-{
-  "name": "fligo-backend",
-  "version": "1.0.0",
-  "description": "API Backend para Fligo - CRM Multitienda SaaS",
-  "main": "src/app.js",
-  "scripts": {
-    "start": "node --use-system-ca src/app.js",
-    "dev": "nodemon --exec \"node --use-system-ca\" src/app.js"
-  },
-  "dependencies": {
-    "bcryptjs": "^2.4.3",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "jsonwebtoken": "^9.0.2",
-    "pg": "^8.11.5"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  }
-}
+Las rutas de la API verifican la fecha de prueba o suscripción en cada solicitud autenticada. Cuando ambas vencen, solo quedan disponibles el perfil y el módulo de suscripciones para gestionar el pago; los demás módulos se bloquean hasta que se apruebe una renovación.
 </file>
 
 <file path="src/controllers/clienteController.js">
@@ -2087,6 +1688,402 @@ exports.eliminarCliente = async (req, res) => {
 };
 </file>
 
+<file path="src/controllers/suscripcionController.js">
+const db = require('../config/db');
+const { obtenerDatosTasasBcv } = require('./configuracionController');
+const { estadoSuscripcion } = require('../utils/suscripcion');
+
+const PLANES = Object.freeze({
+  diaria: { nombre: 'Diaria', precio_usd: 3, dias: 1 },
+  semanal: { nombre: 'Semanal', precio_usd: 7, dias: 7 },
+  mensual: { nombre: 'Mensual', precio_usd: 20, dias: 30 }
+});
+
+function pagoMovilDestino() {
+  return {
+    banco: process.env.PAGO_MOVIL_BANCO || '',
+    telefono: process.env.PAGO_MOVIL_TELEFONO || '',
+    documento: process.env.PAGO_MOVIL_DOCUMENTO || '',
+    titular: process.env.PAGO_MOVIL_TITULAR || ''
+  };
+}
+
+function destinoConfigurado(destino) {
+  return Boolean(destino.banco && destino.telefono && destino.documento);
+}
+
+exports.obtenerSuscripcion = async (req, res) => {
+  try {
+    let tasaBcv = null;
+    let errorTasa = null;
+    try {
+      tasaBcv = await obtenerDatosTasasBcv();
+    } catch (error) {
+      errorTasa = 'No se pudo consultar la tasa del BCV. Intenta actualizar más tarde.';
+      console.error('Error en obtenerSuscripcion [BCV]:', error);
+    }
+
+    const [tenantResult, requestsResult] = await Promise.all([
+      db.query(
+        'SELECT plan, prueba_hasta, suscripcion_hasta FROM tenants WHERE id = $1',
+        [req.user.tenant_id]
+      ),
+      db.query(
+        `SELECT id, plan, precio_usd, tasa_bcv, monto_bs, referencia_pago, fecha_pago,
+                estado, comentario_revision, creado_en, revisado_en
+         FROM solicitudes_suscripcion
+         WHERE tenant_id = $1
+         ORDER BY creado_en DESC
+         LIMIT 10`,
+        [req.user.tenant_id]
+      )
+    ]);
+
+    if (!tenantResult.rows.length) {
+      return res.status(404).json({ success: false, error: 'Empresa no encontrada.' });
+    }
+
+    const destino = pagoMovilDestino();
+    return res.json({
+      success: true,
+      data: {
+        planes: Object.entries(PLANES).map(([id, plan]) => ({ id, ...plan })),
+        tasa_bcv: tasaBcv,
+        error_tasa: errorTasa,
+        pago_movil: { destino, configurado: destinoConfigurado(destino) },
+        es_admin_plataforma: req.user.rol === 'SUPERADMIN'
+          || (req.user.rol === 'OWNER' && process.env.FLIGO_PLATFORM_TENANT_ID === req.user.tenant_id),
+        suscripcion: {
+          ...tenantResult.rows[0],
+          ...estadoSuscripcion(tenantResult.rows[0])
+        },
+        solicitudes: requestsResult.rows
+      }
+    });
+  } catch (error) {
+    console.error('Error en obtenerSuscripcion [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo cargar el módulo de suscripciones.' });
+  }
+};
+
+exports.crearSolicitud = async (req, res) => {
+  const { plan, telefono, documento, monto_bs, referencia_pago, fecha_pago } = req.body;
+  const oferta = PLANES[plan];
+
+  if (!oferta) {
+    return res.status(400).json({ success: false, error: 'Selecciona un plan válido.' });
+  }
+  if (typeof telefono !== 'string' || !/^[+\d\s().-]{7,24}$/.test(telefono.trim())) {
+    return res.status(400).json({ success: false, error: 'Ingresa un teléfono válido.' });
+  }
+  if (typeof documento !== 'string' || !/^[VEJPG]?[-\s]?\d{5,12}$/i.test(documento.trim())) {
+    return res.status(400).json({ success: false, error: 'Ingresa una cédula o documento válido.' });
+  }
+  if (typeof referencia_pago !== 'string' || !/^[a-z0-9-]{4,24}$/i.test(referencia_pago.trim())) {
+    return res.status(400).json({ success: false, error: 'La referencia debe tener entre 4 y 24 caracteres alfanuméricos.' });
+  }
+  if (typeof fecha_pago !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha_pago)
+    || Number.isNaN(Date.parse(`${fecha_pago}T00:00:00Z`))
+    || new Date(`${fecha_pago}T00:00:00Z`).toISOString().slice(0, 10) !== fecha_pago) {
+    return res.status(400).json({ success: false, error: 'Ingresa la fecha del Pago Móvil.' });
+  }
+  if (!Number.isFinite(Number(monto_bs)) || Number(monto_bs) <= 0) {
+    return res.status(400).json({ success: false, error: 'Ingresa un monto válido en bolívares.' });
+  }
+
+  const destino = pagoMovilDestino();
+  if (!destinoConfigurado(destino)) {
+    return res.status(503).json({ success: false, error: 'Fligo aún no ha configurado los datos para recibir pagos. Intenta más tarde.' });
+  }
+
+  let tasas;
+  try {
+    tasas = await obtenerDatosTasasBcv();
+  } catch (error) {
+    console.error('Error en crearSolicitudSuscripcion [BCV]:', error);
+    return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa del BCV para validar el monto. Intenta más tarde.' });
+  }
+
+  const montoEsperadoCentimos = Math.round(oferta.precio_usd * tasas.usd_ves * 100);
+  const montoEnviadoCentimos = Math.round(Number(monto_bs) * 100);
+  if (montoEsperadoCentimos !== montoEnviadoCentimos) {
+    return res.status(400).json({
+      success: false,
+      error: `El monto no coincide con el precio del plan a la tasa BCV actual (${(montoEsperadoCentimos / 100).toFixed(2)} Bs.). Actualiza la tasa y confirma el pago.`
+    });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO solicitudes_suscripcion
+         (tenant_id, plan, precio_usd, tasa_bcv, monto_bs, telefono_pagador, documento_pagador, referencia_pago, fecha_pago)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, plan, precio_usd, tasa_bcv, monto_bs, referencia_pago, fecha_pago, estado, creado_en`,
+      [
+        req.user.tenant_id,
+        plan,
+        oferta.precio_usd,
+        tasas.usd_ves,
+        montoEsperadoCentimos / 100,
+        telefono.trim(),
+        documento.trim().toUpperCase(),
+        referencia_pago.trim(),
+        fecha_pago
+      ]
+    );
+    return res.status(201).json({
+      success: true,
+      message: 'Solicitud enviada. La suscripción se activará cuando se verifique el pago.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ success: false, error: 'Ya existe una solicitud pendiente para tu empresa o esa referencia de pago ya fue enviada.' });
+    }
+    console.error('Error en crearSolicitudSuscripcion [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo enviar la solicitud de pago.' });
+  }
+};
+
+exports.listarSolicitudesPendientes = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT s.id, s.tenant_id, t.nombre_empresa, s.plan, s.precio_usd, s.tasa_bcv,
+              s.monto_bs, s.telefono_pagador, s.documento_pagador, s.referencia_pago,
+              s.fecha_pago, s.creado_en, u.nombre AS nombre_solicitante, u.email AS email_solicitante
+       FROM solicitudes_suscripcion s
+       JOIN tenants t ON t.id = s.tenant_id
+       LEFT JOIN LATERAL (
+         SELECT nombre, email
+         FROM usuarios
+         WHERE tenant_id = t.id AND rol = 'OWNER'
+         ORDER BY creado_en ASC
+         LIMIT 1
+       ) u ON TRUE
+       WHERE s.estado = 'PENDIENTE'
+       ORDER BY s.creado_en ASC
+       LIMIT 100`
+    );
+    return res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error en listarSolicitudesPendientes [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudieron cargar las solicitudes pendientes.' });
+  }
+};
+
+exports.listarEmpresasPlataforma = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT t.id, t.nombre_empresa, t.plan, t.activo, t.creado_en,
+              t.prueba_hasta, t.suscripcion_hasta,
+              CASE
+                WHEN t.suscripcion_hasta > CURRENT_TIMESTAMP THEN 'ACTIVA'
+                WHEN t.prueba_hasta > CURRENT_TIMESTAMP THEN 'PRUEBA'
+                ELSE 'VENCIDA'
+              END AS estado_suscripcion,
+              GREATEST(
+                0,
+                CEIL(EXTRACT(EPOCH FROM (
+                  CASE
+                    WHEN t.suscripcion_hasta > CURRENT_TIMESTAMP THEN t.suscripcion_hasta
+                    WHEN t.prueba_hasta > CURRENT_TIMESTAMP THEN t.prueba_hasta
+                    ELSE CURRENT_TIMESTAMP
+                  END - CURRENT_TIMESTAMP
+                )) / 86400)::INTEGER
+              ) AS dias_restantes,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'id', u.id,
+                  'nombre', u.nombre,
+                  'email', u.email,
+                  'rol', u.rol,
+                  'activo', u.activo,
+                  'sucursal', ti.nombre
+                ) ORDER BY u.creado_en)
+                FROM usuarios u
+                LEFT JOIN tiendas ti ON ti.id = u.tienda_id
+                WHERE u.tenant_id = t.id
+              ), '[]'::json) AS cuentas,
+              COALESCE((
+                SELECT json_agg(json_build_object(
+                  'id', ti.id,
+                  'nombre', ti.nombre,
+                  'activa', ti.activa,
+                  'direccion', ti.direccion,
+                  'telefono', ti.telefono
+                ) ORDER BY ti.creado_en)
+                FROM tiendas ti
+                WHERE ti.tenant_id = t.id
+              ), '[]'::json) AS sucursales
+       FROM tenants t
+       ORDER BY t.creado_en DESC`
+    );
+    return res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error en listarEmpresasPlataforma [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudieron cargar las empresas de la plataforma.' });
+  }
+};
+
+exports.renovarSuscripcionEmpresa = async (req, res) => {
+  const { plan } = req.body;
+  const oferta = PLANES[plan];
+  if (!oferta) {
+    return res.status(400).json({ success: false, error: 'Selecciona un plan válido para renovar.' });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `UPDATE tenants
+       SET plan = $1,
+           prueba_hasta = NULL,
+           suscripcion_hasta = GREATEST(COALESCE(suscripcion_hasta, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+             + ($2 * INTERVAL '1 day')
+       WHERE id = $3
+       RETURNING id, nombre_empresa, plan, prueba_hasta, suscripcion_hasta`,
+      [plan, oferta.dias, req.params.tenantId]
+    );
+    if (!result.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'No se encontró la empresa que quieres renovar.' });
+    }
+    await client.query('COMMIT');
+    return res.json({
+      success: true,
+      message: `Suscripción renovada por ${oferta.dias} ${oferta.dias === 1 ? 'día' : 'días'}.`,
+      data: { ...result.rows[0], ...estadoSuscripcion(result.rows[0]) }
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en renovarSuscripcionEmpresa [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo renovar la suscripción de la empresa.' });
+  } finally {
+    client.release();
+  }
+};
+
+exports.revisarSolicitud = async (req, res) => {
+  const { estado, comentario } = req.body;
+  if (!['APROBADA', 'RECHAZADA'].includes(estado)) {
+    return res.status(400).json({ success: false, error: 'La revisión debe aprobar o rechazar la solicitud.' });
+  }
+  if (comentario !== undefined && (typeof comentario !== 'string' || comentario.length > 500)) {
+    return res.status(400).json({ success: false, error: 'El comentario no puede superar 500 caracteres.' });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const requestResult = await client.query(
+      `SELECT id, tenant_id, plan
+       FROM solicitudes_suscripcion
+       WHERE id = $1 AND estado = 'PENDIENTE'
+       FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!requestResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'La solicitud no existe o ya fue revisada.' });
+    }
+    const request = requestResult.rows[0];
+
+    if (estado === 'APROBADA') {
+      const duracionDias = PLANES[request.plan]?.dias;
+      if (!duracionDias) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, error: 'El plan de esta solicitud ya no está disponible.' });
+      }
+      await client.query(
+        `UPDATE tenants
+         SET plan = $1,
+             prueba_hasta = NULL,
+             suscripcion_hasta = GREATEST(COALESCE(suscripcion_hasta, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP) + ($2 * INTERVAL '1 day')
+         WHERE id = $3`,
+        [request.plan, duracionDias, request.tenant_id]
+      );
+    }
+
+    const updated = await client.query(
+      `UPDATE solicitudes_suscripcion
+       SET estado = $1, comentario_revision = $2, revisada_por = $3, revisado_en = CURRENT_TIMESTAMP
+       WHERE id = $4
+       RETURNING id, tenant_id, plan, estado, revisado_en`,
+      [estado, comentario?.trim() || null, req.user.user_id, request.id]
+    );
+    await client.query('COMMIT');
+    return res.json({ success: true, data: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en revisarSolicitudSuscripcion [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo revisar la solicitud.' });
+  } finally {
+    client.release();
+  }
+};
+</file>
+
+<file path="package.json">
+{
+  "name": "fligo-backend",
+  "version": "1.0.0",
+  "description": "API Backend para Fligo - CRM Multitienda SaaS",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node --use-system-ca src/app.js",
+    "dev": "nodemon --exec \"node --use-system-ca\" src/app.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^14.5.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
+</file>
+
+<file path="docs/AUTENTICACION_FIREBASE.md">
+# Autenticación de Fliigo con Firebase
+
+Firebase Authentication administra las credenciales. PostgreSQL en Render sigue siendo la fuente de verdad para empresas, sucursales, usuarios, roles y suscripciones. El backend verifica el ID token de Firebase y emite el JWT interno de Fligo.
+
+## Verificación sin claves privadas
+
+El backend inicializa Firebase Admin únicamente con el ID público del proyecto (`fliigo`) y usa `verifyIdToken()`. Para verificar la firma, el SDK descarga y almacena en caché los certificados públicos de firma que publica Google para Firebase Authentication. La comprobación de firma y de los claims del ID token no requiere una clave privada ni una cuenta de servicio con permisos para administrar usuarios.
+
+No configures `FIREBASE_CLIENT_EMAIL` ni `FIREBASE_PRIVATE_KEY` en Render. `FIREBASE_PROJECT_ID` es opcional; si no se define, el backend usa `fliigo`.
+
+Por esta decisión el backend no crea identidades en Firebase Admin. El usuario se registra desde el SDK web, y Firebase verifica el correo; Render únicamente crea/vincula la cuenta de negocio después de verificar el ID token.
+
+## Migración y despliegue
+
+1. Haz una copia de seguridad de PostgreSQL.
+2. Ejecuta `migrations/003_firebase_auth.sql` una vez en la base PostgreSQL usada por Render.
+3. Despliega el backend; no necesita credenciales privadas de Firebase.
+4. Despliega el frontend. La configuración web pública de Firebase está en `js/firebase-client.js`.
+5. En Firebase Authentication, autoriza los dominios reales de Hosting y cualquier dominio local utilizado para desarrollo (por ejemplo, `localhost` o `127.0.0.1`).
+6. Prueba registro con correo, el enlace de verificación, Google, restablecimiento de contraseña, una cuenta anterior y una cuenta de empleado.
+
+Los endpoints `/api/auth/login` y `/api/auth/register-tenant` ya no se utilizan ni están publicados: el acceso se realiza mediante `/api/auth/firebase-session`, que rechaza tokens sin correo verificado.
+
+## Cuentas existentes
+
+- Una cuenta existente de correo y contraseña puede iniciar sesión una vez con sus credenciales antiguas. El backend valida la contraseña anterior contra el hash de PostgreSQL y el SDK web crea la identidad Firebase sin marcar el correo como verificado. Firebase envía el mensaje de verificación; después, Render asocia el UID al usuario PostgreSQL existente.
+- Si una cuenta nueva verifica el correo desde otro dispositivo y no conserva los datos del formulario, inicia sesión, vuelve a Registro, completa empresa y aceptación legal y usa «Continuar con Google / sesión activa»; el backend reutiliza la sesión Firebase verificada.
+- Los usuarios creados por un administrador también deben verificar su correo en su primer acceso. El backend guarda su contraseña temporal en el hash existente de PostgreSQL; en el primer acceso la misma contraseña crea la identidad de Firebase desde el SDK web. El administrador entrega la contraseña temporal usando un canal seguro.
+- Una cuenta anterior que ya tenga una identidad Firebase con ese correo debe usar el restablecimiento de contraseña de Firebase; no se sobrescribe una identidad existente.
+- Los nuevos usuarios con correo se guardan en PostgreSQL al autenticarse después de verificar el correo. Las cuentas nuevas con Google, que ya tiene el correo verificado, se crean al completar el formulario de empresa.
+
+El restablecimiento de contraseña afecta a Firebase Authentication. Ya no modifica ni utiliza `password_hash` de PostgreSQL para iniciar sesión.
+</file>
+
 <file path="src/controllers/configuracionController.js">
 const db = require('../config/db');
 const https = require('https');
@@ -2281,6 +2278,272 @@ exports.obtenerTiendas = async (req, res) => {
   } catch (error) {
     console.error('Error en obtenerTiendas [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error al obtener la lista de tiendas.' });
+  }
+};
+</file>
+
+<file path="src/controllers/authController.js">
+const crypto = require('crypto');
+const db = require('../config/db');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const firebaseTokenVerifier = require('../config/firebaseTokenVerifier');
+const { estadoSuscripcion } = require('../utils/suscripcion');
+
+function createSession(user, res) {
+  const token = jwt.sign(
+    {
+      user_id: user.id,
+      tenant_id: user.tenant_id,
+      tienda_id: user.tienda_id,
+      rol: user.rol
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
+  );
+
+  res.json({
+    success: true,
+    message: 'Inicio de sesión exitoso en Fligo.',
+    data: {
+      token,
+      usuario: {
+        id: user.id,
+        nombre: user.nombre,
+        email: user.email,
+        rol: user.rol,
+        tenant_id: user.tenant_id,
+        tienda_id: user.tienda_id,
+        empresa: user.nombre_empresa
+      },
+      suscripcion: estadoSuscripcion(user)
+    }
+  });
+}
+
+exports.firebaseSession = async (req, res) => {
+  const { idToken, registro } = req.body || {};
+  if (!idToken) {
+    return res.status(400).json({ success: false, error: 'Falta la credencial de Firebase.' });
+  }
+
+  let firebaseUser;
+  try {
+    const decodedToken = await firebaseTokenVerifier.verifyIdToken(idToken);
+    if (!decodedToken.email || !decodedToken.email_verified) {
+      return res.status(403).json({
+        success: false,
+        error: 'Verifica tu correo electrónico antes de acceder a Fligo.'
+      });
+    }
+    firebaseUser = {
+      uid: decodedToken.uid,
+      email: decodedToken.email.trim().toLowerCase(),
+      name: decodedToken.name || decodedToken.email.split('@')[0]
+    };
+  } catch (error) {
+    console.error('Error al verificar identidad de Firebase [Fligo]:', error);
+    return res.status(401).json({ success: false, error: 'La sesión de Firebase no es válida. Inicia sesión nuevamente.' });
+  }
+
+  let client;
+  try {
+    client = await db.pool.connect();
+    await client.query('BEGIN');
+    let userResult = await client.query(
+      `SELECT u.id, u.firebase_uid, u.tenant_id, u.tienda_id, u.nombre, u.email, u.rol, u.activo,
+              t.nombre_empresa, t.prueba_hasta, t.suscripcion_hasta
+       FROM usuarios u
+       JOIN tenants t ON u.tenant_id = t.id
+       WHERE u.firebase_uid = $1 OR LOWER(u.email) = $2
+       FOR UPDATE OF u`,
+      [firebaseUser.uid, firebaseUser.email]
+    );
+
+    if (userResult.rows.length > 1) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, error: 'No se pudo asociar esta identidad a una única cuenta de Fligo.' });
+    }
+
+    let user = userResult.rows[0];
+    if (user && user.firebase_uid && user.firebase_uid !== firebaseUser.uid) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        success: false,
+        error: 'Este correo ya está asociado a otra cuenta de acceso. Contacta al administrador.'
+      });
+    }
+
+    if (!user) {
+      const companyName = typeof registro?.nombre_empresa === 'string' ? registro.nombre_empresa.trim() : '';
+      if (!companyName || companyName.length > 150) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({
+          success: false,
+          error: 'No existe una cuenta de Fligo para este correo. Regístrate para crear tu empresa.'
+        });
+      }
+
+      const tenantResult = await client.query(
+        `INSERT INTO tenants (nombre_empresa, prueba_hasta)
+         VALUES ($1, CURRENT_TIMESTAMP + INTERVAL '7 days')
+         RETURNING id, nombre_empresa, prueba_hasta, suscripcion_hasta`,
+        [companyName]
+      );
+      const tenant = tenantResult.rows[0];
+      const storeResult = await client.query(
+        'INSERT INTO tiendas (tenant_id, nombre) VALUES ($1, $2) RETURNING id, nombre',
+        [tenant.id, 'Sucursal Principal']
+      );
+      const store = storeResult.rows[0];
+      const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
+      const newUser = await client.query(
+        `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, firebase_uid, rol)
+         VALUES ($1, $2, $3, $4, $5, $6, 'OWNER')
+         RETURNING id, firebase_uid, tenant_id, tienda_id, nombre, email, rol, activo`,
+        [tenant.id, store.id, firebaseUser.name, firebaseUser.email, passwordHash, firebaseUser.uid]
+      );
+      user = {
+        ...newUser.rows[0],
+        nombre_empresa: tenant.nombre_empresa,
+        prueba_hasta: tenant.prueba_hasta,
+        suscripcion_hasta: tenant.suscripcion_hasta
+      };
+    } else if (!user.firebase_uid) {
+      const linked = await client.query(
+        `UPDATE usuarios SET firebase_uid = $1
+         WHERE id = $2 AND firebase_uid IS NULL
+         RETURNING id`,
+        [firebaseUser.uid, user.id]
+      );
+      if (!linked.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ success: false, error: 'La cuenta ya fue asociada a otra identidad.' });
+      }
+    }
+
+    if (!user.activo) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, error: 'Tu usuario en Fligo se encuentra inactivo. Contacta a tu administrador.' });
+    }
+
+    await client.query('COMMIT');
+    createSession(user, res);
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Error al revertir la sesión de Firebase [Fligo]:', rollbackError);
+      }
+    }
+    console.error('Error al iniciar sesión con Firebase [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error interno del servidor al iniciar sesión.' });
+  } finally {
+    if (client) client.release();
+  }
+};
+
+exports.migrateLegacyAccount = async (req, res) => {
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = req.body?.password;
+  if (!email || typeof password !== 'string' || !password) {
+    return res.status(400).json({ success: false, error: 'Ingresa el correo y contraseña actuales de tu cuenta.' });
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT id, email, nombre, password_hash, firebase_uid
+       FROM usuarios WHERE LOWER(email) = $1`,
+      [email]
+    );
+    const user = result.rows[0];
+    if (!user || user.firebase_uid || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ success: false, error: 'No se pudo verificar la cuenta con esas credenciales.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Credenciales anteriores verificadas. Continúa para crear tu acceso de Firebase.'
+    });
+  } catch (error) {
+    console.error('Error al migrar cuenta anterior a Firebase [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'No se pudo preparar la migración de esta cuenta.' });
+  }
+};
+
+exports.createEmpleado = async (req, res) => {
+  const { nombre, email: rawEmail, password, rol, tienda_id } = req.body || {};
+  const email = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : '';
+  const tenant_id = req.user.tenant_id;
+
+  if (!nombre || !email || !password || !rol) {
+    return res.status(400).json({ success: false, error: 'Todos los campos obligatorios deben ser proporcionados.' });
+  }
+  if (!['MANAGER', 'EMPLOYEE'].includes(rol) || typeof password !== 'string' || password.length < 6) {
+    return res.status(400).json({ success: false, error: 'El rol o la contraseña proporcionados no son válidos.' });
+  }
+
+  try {
+    const existingUser = await db.query('SELECT id FROM usuarios WHERE LOWER(email) = $1', [email]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ success: false, error: 'El correo electrónico ya está registrado en Fligo.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await db.query(
+      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, nombre, email, rol, tienda_id, creado_en`,
+      [tenant_id, tienda_id || null, nombre, email, passwordHash, rol]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Empleado registrado. Deberá verificar su correo la primera vez que inicie sesión.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en createEmpleado [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el empleado.' });
+  }
+};
+
+exports.getProfile = async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT u.id, u.nombre, u.email, u.rol, u.tenant_id, u.tienda_id,
+              t.nombre_empresa, t.plan, t.prueba_hasta, t.suscripcion_hasta,
+              s.nombre as nombre_tienda
+       FROM usuarios u
+       JOIN tenants t ON u.tenant_id = t.id
+       LEFT JOIN tiendas s ON u.tienda_id = s.id
+       WHERE u.id = $1`,
+      [req.user.user_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Usuario de Fligo no encontrado.' });
+    }
+
+    const profile = result.rows[0];
+    const suscripcion = estadoSuscripcion(profile);
+    const esAdminPlataforma = profile.rol === 'SUPERADMIN'
+      || (profile.rol === 'OWNER'
+        && process.env.FLIGO_PLATFORM_TENANT_ID
+        && process.env.FLIGO_PLATFORM_TENANT_ID === profile.tenant_id);
+    res.json({
+      success: true,
+      data: {
+        ...profile,
+        es_admin_plataforma: Boolean(esAdminPlataforma),
+        estado_suscripcion: suscripcion.estado,
+        dias_suscripcion: suscripcion.dias_restantes
+      }
+    });
+  } catch (error) {
+    console.error('Error en getProfile [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener datos del perfil.' });
   }
 };
 </file>
@@ -2519,15 +2782,46 @@ exports.crearCotizacion = async (req, res) => {
   const { cliente_id, productos, descuento = 0, impuesto = 0, notas, tienda_id } = req.body;
   const tenant_id = req.user.tenant_id;
   const targetTiendaId = tienda_id || req.user.tienda_id;
+  const descuentoValidado = Number(descuento);
+  const impuestoValidado = Number(impuesto);
 
   if (!productos || !Array.isArray(productos) || productos.length === 0) {
     return res.status(400).json({ success: false, error: 'La cotización debe incluir al menos un producto.' });
+  }
+  if (!targetTiendaId) {
+    return res.status(400).json({ success: false, error: 'Debes especificar la tienda donde se crea el presupuesto.' });
+  }
+  if (!Number.isFinite(descuentoValidado) || descuentoValidado < 0 || !Number.isFinite(impuestoValidado) || impuestoValidado < 0) {
+    return res.status(400).json({ success: false, error: 'El impuesto y el descuento deben ser montos válidos no negativos.' });
+  }
+  if (productos.some(item => !item || !item.producto_id || !Number.isInteger(Number(item.cantidad)) || Number(item.cantidad) <= 0)) {
+    return res.status(400).json({ success: false, error: 'Cada producto debe tener un identificador y una cantidad entera mayor que cero.' });
   }
 
   const client = await db.pool.connect();
 
   try {
     await client.query('BEGIN');
+
+    const tiendaRes = await client.query(
+      'SELECT id FROM tiendas WHERE id = $1 AND tenant_id = $2 AND activa = TRUE',
+      [targetTiendaId, tenant_id]
+    );
+    if (tiendaRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa o está inactiva.' });
+    }
+
+    if (cliente_id) {
+      const clienteRes = await client.query(
+        'SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2 AND activo = TRUE',
+        [cliente_id, tenant_id]
+      );
+      if (clienteRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: 'El cliente seleccionado no existe o no pertenece a la empresa.' });
+      }
+    }
 
     let subtotalCalculado = 0;
     const itemsProcesados = [];
@@ -2544,25 +2838,34 @@ exports.crearCotizacion = async (req, res) => {
       }
 
       const prod = prodRes.rows[0];
-      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
-      const subtotalItem = precioUnitario * item.cantidad;
+      const precioUnitario = item.precio_unitario !== undefined ? Number(item.precio_unitario) : Number(prod.precio_base);
+      const cantidad = Number(item.cantidad);
+      if (!Number.isFinite(precioUnitario) || precioUnitario < 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, error: 'El precio unitario de cada producto debe ser un monto válido no negativo.' });
+      }
+      const subtotalItem = precioUnitario * cantidad;
       subtotalCalculado += subtotalItem;
 
       itemsProcesados.push({
         producto_id: prod.id,
-        cantidad: item.cantidad,
+        cantidad,
         precio_unitario: precioUnitario,
         subtotal: subtotalItem
       });
     }
 
-    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+    const totalCalculado = subtotalCalculado + impuestoValidado - descuentoValidado;
+    if (!Number.isFinite(totalCalculado) || totalCalculado <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'El total del presupuesto debe ser mayor que cero.' });
+    }
 
     const cotRes = await client.query(
       `INSERT INTO cotizaciones (tenant_id, tienda_id, cliente_id, usuario_id, subtotal, impuesto, descuento, total, notas)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, subtotalCalculado, impuestoValidado, descuentoValidado, totalCalculado, typeof notas === 'string' && notas.trim() ? notas.trim() : null]
     );
 
     const nuevaCotizacion = cotRes.rows[0];
@@ -2589,6 +2892,101 @@ exports.crearCotizacion = async (req, res) => {
     res.status(500).json({ success: false, error: 'Error al generar la cotización.' });
   } finally {
     client.release();
+  }
+};
+
+// 3. Consultar presupuestos creados en la empresa
+exports.obtenerCotizaciones = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const pageValue = Number.parseInt(req.query.page, 10);
+  const limitValue = Number.parseInt(req.query.limit, 10);
+  const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const limit = Number.isInteger(limitValue) && limitValue > 0 ? Math.min(limitValue, 100) : 100;
+  const offset = (page - 1) * limit;
+  const params = [tenant_id];
+  const conditions = ['c.tenant_id = $1'];
+
+  if (req.user.rol === 'EMPLOYEE') {
+    params.push(req.user.user_id);
+    conditions.push(`c.usuario_id = $${params.length}`);
+  } else if (req.query.tienda_id) {
+    params.push(req.query.tienda_id);
+    conditions.push(`c.tienda_id = $${params.length}`);
+  } else if (req.user.tienda_id) {
+    params.push(req.user.tienda_id);
+    conditions.push(`c.tienda_id = $${params.length}`);
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT c.*, cl.nombre AS nombre_cliente, u.nombre AS nombre_vendedor, t.nombre AS nombre_tienda,
+              COALESCE(d.productos, '[]'::json) AS productos
+       FROM cotizaciones c
+       LEFT JOIN clientes cl ON c.cliente_id = cl.id
+       LEFT JOIN usuarios u ON c.usuario_id = u.id
+       LEFT JOIN tiendas t ON c.tienda_id = t.id
+       LEFT JOIN LATERAL (
+         SELECT json_agg(json_build_object(
+           'producto_id', dc.producto_id,
+           'nombre_producto', p.nombre,
+           'cantidad', dc.cantidad,
+           'precio_unitario', dc.precio_unitario,
+           'subtotal', dc.subtotal
+         ) ORDER BY dc.id) AS productos
+         FROM detalle_cotizacion dc
+         LEFT JOIN productos p ON dc.producto_id = p.id
+         WHERE dc.cotizacion_id = c.id
+       ) d ON TRUE
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY c.creado_en DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset]
+    );
+
+    res.json({ success: true, data: result.rows, page, limit });
+  } catch (error) {
+    console.error('Error en obtenerCotizaciones [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al consultar los presupuestos.' });
+  }
+};
+
+// 4. Actualizar el seguimiento de un presupuesto
+exports.actualizarEstadoCotizacion = async (req, res) => {
+  const { id } = req.params;
+  const { estado } = req.body;
+  const estadosPermitidos = new Set(['PENDIENTE', 'APROBADA', 'RECHAZADA']);
+
+  if (!estadosPermitidos.has(estado)) {
+    return res.status(400).json({ success: false, error: 'El estado del presupuesto no es válido.' });
+  }
+
+  const params = [estado, id, req.user.tenant_id];
+  let scope = '';
+  if (req.user.rol === 'EMPLOYEE') {
+    params.push(req.user.user_id);
+    scope = ` AND usuario_id = $${params.length}`;
+  } else if (req.user.tienda_id) {
+    params.push(req.user.tienda_id);
+    scope = ` AND tienda_id = $${params.length}`;
+  }
+
+  try {
+    const result = await db.query(
+      `UPDATE cotizaciones
+       SET estado = $1
+       WHERE id = $2 AND tenant_id = $3 AND estado <> 'CONVERTIDA'${scope}
+       RETURNING *`,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Presupuesto no encontrado, convertido o sin permisos.' });
+    }
+
+    res.json({ success: true, message: 'Estado del presupuesto actualizado.', data: result.rows[0] });
+  } catch (error) {
+    console.error('Error en actualizarEstadoCotizacion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al actualizar el estado del presupuesto.' });
   }
 };
 
