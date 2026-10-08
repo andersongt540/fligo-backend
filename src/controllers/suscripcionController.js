@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { obtenerDatosTasasBcv } = require('./configuracionController');
+const { estadoSuscripcion } = require('../utils/suscripcion');
 
 const PLANES = Object.freeze({
   diaria: { nombre: 'Diaria', precio_usd: 3, dias: 1 },
@@ -33,7 +34,7 @@ exports.obtenerSuscripcion = async (req, res) => {
 
     const [tenantResult, requestsResult] = await Promise.all([
       db.query(
-        'SELECT plan, suscripcion_hasta FROM tenants WHERE id = $1',
+        'SELECT plan, prueba_hasta, suscripcion_hasta FROM tenants WHERE id = $1',
         [req.user.tenant_id]
       ),
       db.query(
@@ -61,7 +62,10 @@ exports.obtenerSuscripcion = async (req, res) => {
         pago_movil: { destino, configurado: destinoConfigurado(destino) },
         es_admin_plataforma: req.user.rol === 'SUPERADMIN'
           || (req.user.rol === 'OWNER' && process.env.FLIGO_PLATFORM_TENANT_ID === req.user.tenant_id),
-        suscripcion: tenantResult.rows[0],
+        suscripcion: {
+          ...tenantResult.rows[0],
+          ...estadoSuscripcion(tenantResult.rows[0])
+        },
         solicitudes: requestsResult.rows
       }
     });
@@ -210,6 +214,7 @@ exports.revisarSolicitud = async (req, res) => {
       await client.query(
         `UPDATE tenants
          SET plan = $1,
+             prueba_hasta = NULL,
              suscripcion_hasta = GREATEST(COALESCE(suscripcion_hasta, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP) + ($2 * INTERVAL '1 day')
          WHERE id = $3`,
         [request.plan, duracionDias, request.tenant_id]

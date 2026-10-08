@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { estadoSuscripcion } = require('../utils/suscripcion');
 
 // 1. Registro de Empresa e Inicio en Fligo (Onboarding)
 exports.registerTenant = async (req, res) => {
@@ -30,7 +31,9 @@ exports.registerTenant = async (req, res) => {
 
     // Crear Empresa / Inquilino en Fligo
     const tenantRes = await client.query(
-      'INSERT INTO tenants (nombre_empresa) VALUES ($1) RETURNING id, nombre_empresa, plan',
+      `INSERT INTO tenants (nombre_empresa, prueba_hasta)
+       VALUES ($1, CURRENT_TIMESTAMP + INTERVAL '7 days')
+       RETURNING id, nombre_empresa, plan, prueba_hasta, suscripcion_hasta`,
       [nombre_empresa]
     );
     const newTenant = tenantRes.rows[0];
@@ -73,6 +76,12 @@ exports.registerTenant = async (req, res) => {
         token,
         usuario: userRes.rows[0],
         empresa: newTenant,
+        suscripcion: {
+          estado: 'PRUEBA',
+          dias_restantes: 7,
+          prueba_hasta: newTenant.prueba_hasta,
+          suscripcion_hasta: newTenant.suscripcion_hasta
+        },
         tienda: newTienda
       }
     });
@@ -103,7 +112,7 @@ exports.login = async (req, res) => {
   try {
     const result = await db.query(
       `SELECT u.id, u.tenant_id, u.tienda_id, u.nombre, u.email, u.password_hash, u.rol, u.activo,
-              t.nombre_empresa 
+              t.nombre_empresa, t.prueba_hasta, t.suscripcion_hasta
        FROM usuarios u
        JOIN tenants t ON u.tenant_id = t.id
        WHERE u.email = $1`,
@@ -153,7 +162,8 @@ exports.login = async (req, res) => {
           tenant_id: usuario.tenant_id,
           tienda_id: usuario.tienda_id,
           empresa: usuario.nombre_empresa
-        }
+        },
+        suscripcion: estadoSuscripcion(usuario)
       }
     });
 
@@ -210,7 +220,9 @@ exports.createEmpleado = async (req, res) => {
 exports.getProfile = async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT u.id, u.nombre, u.email, u.rol, u.tenant_id, u.tienda_id, t.nombre_empresa, s.nombre as nombre_tienda
+      `SELECT u.id, u.nombre, u.email, u.rol, u.tenant_id, u.tienda_id,
+              t.nombre_empresa, t.plan, t.prueba_hasta, t.suscripcion_hasta,
+              s.nombre as nombre_tienda
        FROM usuarios u
        JOIN tenants t ON u.tenant_id = t.id
        LEFT JOIN tiendas s ON u.tienda_id = s.id
@@ -222,7 +234,16 @@ exports.getProfile = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Usuario de Fligo no encontrado.' });
     }
 
-    res.json({ success: true, data: result.rows[0] });
+    const profile = result.rows[0];
+    const suscripcion = estadoSuscripcion(profile);
+    res.json({
+      success: true,
+      data: {
+        ...profile,
+        estado_suscripcion: suscripcion.estado,
+        dias_suscripcion: suscripcion.dias_restantes
+      }
+    });
   } catch (error) {
     console.error('Error en getProfile [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error al obtener datos del perfil.' });

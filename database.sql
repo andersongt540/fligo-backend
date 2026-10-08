@@ -9,6 +9,7 @@ CREATE TABLE tenants (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     nombre_empresa VARCHAR(150) NOT NULL,
     plan VARCHAR(50) DEFAULT 'basic',
+    prueba_hasta TIMESTAMPTZ,
     activo BOOLEAN DEFAULT TRUE,
     creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
