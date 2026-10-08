@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const firebaseAdmin = require('../config/firebaseAdmin');
+const firebaseTokenVerifier = require('../config/firebaseTokenVerifier');
 const { estadoSuscripcion } = require('../utils/suscripcion');
 
 function createSession(user, res) {
@@ -44,7 +44,7 @@ exports.firebaseSession = async (req, res) => {
 
   let firebaseUser;
   try {
-    const decodedToken = await firebaseAdmin.auth().verifyIdToken(idToken);
+    const decodedToken = await firebaseTokenVerifier.verifyIdToken(idToken);
     if (!decodedToken.email || !decodedToken.email_verified) {
       return res.status(403).json({
         success: false,
@@ -57,10 +57,6 @@ exports.firebaseSession = async (req, res) => {
       name: decodedToken.name || decodedToken.email.split('@')[0]
     };
   } catch (error) {
-    if (error.code === 'firebase/configuration-error') {
-      console.error('Configuración de Firebase incompleta [Fligo]:', error.message);
-      return res.status(500).json({ success: false, error: 'La autenticación no está configurada en el servidor. Contacta al administrador.' });
-    }
     console.error('Error al verificar identidad de Firebase [Fligo]:', error);
     return res.status(401).json({ success: false, error: 'La sesión de Firebase no es válida. Inicia sesión nuevamente.' });
   }
@@ -181,28 +177,9 @@ exports.migrateLegacyAccount = async (req, res) => {
       return res.status(401).json({ success: false, error: 'No se pudo verificar la cuenta con esas credenciales.' });
     }
 
-    const migratedPassword = password.length >= 6 ? password : crypto.randomBytes(32).toString('hex');
-    try {
-      await firebaseAdmin.auth().createUser({
-        email: user.email,
-        password: migratedPassword,
-        displayName: user.nombre,
-        emailVerified: false
-      });
-    } catch (error) {
-      if (error.code === 'auth/email-already-exists') {
-        return res.status(409).json({
-          success: false,
-          error: 'Ya existe una identidad Firebase para este correo. Usa “Olvidaste tu contraseña” para recuperar el acceso.'
-        });
-      }
-      throw error;
-    }
-
-    res.status(201).json({
+    res.json({
       success: true,
-      password_reset_required: migratedPassword !== password,
-      message: 'Cuenta preparada. Inicia sesión para recibir el correo de verificación.'
+      message: 'Credenciales anteriores verificadas. Continúa para crear tu acceso de Firebase.'
     });
   } catch (error) {
     console.error('Error al migrar cuenta anterior a Firebase [Fligo]:', error);
@@ -222,27 +199,18 @@ exports.createEmpleado = async (req, res) => {
     return res.status(400).json({ success: false, error: 'El rol o la contraseña proporcionados no son válidos.' });
   }
 
-  let createdFirebaseUser;
   try {
     const existingUser = await db.query('SELECT id FROM usuarios WHERE LOWER(email) = $1', [email]);
     if (existingUser.rows.length > 0) {
       return res.status(400).json({ success: false, error: 'El correo electrónico ya está registrado en Fligo.' });
     }
 
-    const firebaseUser = await firebaseAdmin.auth().createUser({
-      email,
-      password,
-      displayName: nombre,
-      emailVerified: false
-    });
-    createdFirebaseUser = firebaseUser.uid;
-
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await db.query(
-      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, firebase_uid, rol)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, nombre, email, rol, tienda_id, creado_en`,
-      [tenant_id, tienda_id || null, nombre, email, passwordHash, firebaseUser.uid, rol]
+      [tenant_id, tienda_id || null, nombre, email, passwordHash, rol]
     );
 
     res.status(201).json({
@@ -251,16 +219,6 @@ exports.createEmpleado = async (req, res) => {
       data: result.rows[0]
     });
   } catch (error) {
-    if (createdFirebaseUser) {
-      try {
-        await firebaseAdmin.auth().deleteUser(createdFirebaseUser);
-      } catch (cleanupError) {
-        console.error('No se pudo limpiar la identidad Firebase tras fallar el alta del empleado:', cleanupError);
-      }
-    }
-    if (error.code === 'auth/email-already-exists') {
-      return res.status(409).json({ success: false, error: 'Ese correo ya tiene una cuenta de acceso. Contacta al administrador.' });
-    }
     console.error('Error en createEmpleado [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error al registrar el empleado.' });
   }

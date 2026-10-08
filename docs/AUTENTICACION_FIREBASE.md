@@ -2,22 +2,20 @@
 
 Firebase Authentication administra las credenciales. PostgreSQL en Render sigue siendo la fuente de verdad para empresas, sucursales, usuarios, roles y suscripciones. El backend verifica el ID token de Firebase y emite el JWT interno de Fligo.
 
-## Configuración en Render
+## Verificación sin claves privadas
 
-En el servicio backend agrega estas variables de entorno:
+El backend inicializa Firebase Admin únicamente con el ID público del proyecto (`fliigo`) y usa `verifyIdToken()`. Para verificar la firma, el SDK descarga y almacena en caché los certificados públicos de firma que publica Google para Firebase Authentication. La comprobación de firma y de los claims del ID token no requiere una clave privada ni una cuenta de servicio con permisos para administrar usuarios.
 
-- `FIREBASE_PROJECT_ID`: `fliigo`
-- `FIREBASE_CLIENT_EMAIL`: correo de la cuenta de servicio usada por Firebase Admin SDK
-- `FIREBASE_PRIVATE_KEY`: clave privada de esa cuenta de servicio; guarda el valor como secreto de Render y conserva los saltos de línea (`\n`) si Render lo requiere
+No configures `FIREBASE_CLIENT_EMAIL` ni `FIREBASE_PRIVATE_KEY` en Render. `FIREBASE_PROJECT_ID` es opcional; si no se define, el backend usa `fliigo`.
 
-Obtén una cuenta de servicio desde Google Cloud Console para el proyecto `fliigo`, con permisos de Firebase Authentication suficientes para verificar tokens y administrar identidades. Nunca pongas esta clave privada en el frontend, Git, Firebase Hosting ni en mensajes.
+Por esta decisión el backend no crea identidades en Firebase Admin. El usuario se registra desde el SDK web, y Firebase verifica el correo; Render únicamente crea/vincula la cuenta de negocio después de verificar el ID token.
 
 ## Migración y despliegue
 
 1. Haz una copia de seguridad de PostgreSQL.
 2. Ejecuta `migrations/003_firebase_auth.sql` una vez en la base PostgreSQL usada por Render.
-3. Configura las tres variables anteriores en Render y despliega el backend.
-4. Despliega el frontend. La configuración web pública de Firebase está en `js/firebase-client.js`; no contiene credenciales de Admin SDK.
+3. Despliega el backend; no necesita credenciales privadas de Firebase.
+4. Despliega el frontend. La configuración web pública de Firebase está en `js/firebase-client.js`.
 5. En Firebase Authentication, autoriza los dominios reales de Hosting y cualquier dominio local utilizado para desarrollo (por ejemplo, `localhost` o `127.0.0.1`).
 6. Prueba registro con correo, el enlace de verificación, Google, restablecimiento de contraseña, una cuenta anterior y una cuenta de empleado.
 
@@ -25,9 +23,9 @@ Los endpoints `/api/auth/login` y `/api/auth/register-tenant` ya no se utilizan 
 
 ## Cuentas existentes
 
-- Una cuenta existente de correo y contraseña puede iniciar sesión una vez con sus credenciales antiguas. El backend verifica el hash anterior, crea su identidad Firebase sin marcar el correo como verificado y el frontend envía el mensaje de verificación. Tras verificarlo, el backend asocia el UID de Firebase al usuario PostgreSQL existente.
+- Una cuenta existente de correo y contraseña puede iniciar sesión una vez con sus credenciales antiguas. El backend valida la contraseña anterior contra el hash de PostgreSQL y el SDK web crea la identidad Firebase sin marcar el correo como verificado. Firebase envía el mensaje de verificación; después, Render asocia el UID al usuario PostgreSQL existente.
 - Si una cuenta nueva verifica el correo desde otro dispositivo y no conserva los datos del formulario, inicia sesión, vuelve a Registro, completa empresa y aceptación legal y usa «Continuar con Google / sesión activa»; el backend reutiliza la sesión Firebase verificada.
-- Los usuarios creados por un administrador también deben verificar su correo en su primer acceso. El administrador entrega la contraseña temporal usando un canal seguro.
+- Los usuarios creados por un administrador también deben verificar su correo en su primer acceso. El backend guarda su contraseña temporal en el hash existente de PostgreSQL; en el primer acceso la misma contraseña crea la identidad de Firebase desde el SDK web. El administrador entrega la contraseña temporal usando un canal seguro.
 - Una cuenta anterior que ya tenga una identidad Firebase con ese correo debe usar el restablecimiento de contraseña de Firebase; no se sobrescribe una identidad existente.
 - Los nuevos usuarios con correo se guardan en PostgreSQL al autenticarse después de verificar el correo. Las cuentas nuevas con Google, que ya tiene el correo verificado, se crean al completar el formulario de empresa.
 
