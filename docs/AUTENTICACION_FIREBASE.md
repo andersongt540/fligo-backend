@@ -26,6 +26,7 @@ Los endpoints `/api/auth/login` y `/api/auth/register-tenant` ya no se utilizan 
 ## Cuentas existentes
 
 - Una cuenta existente de correo y contraseña puede iniciar sesión una vez con sus credenciales antiguas. El backend verifica el hash anterior, crea su identidad Firebase sin marcar el correo como verificado y el frontend envía el mensaje de verificación. Tras verificarlo, el backend asocia el UID de Firebase al usuario PostgreSQL existente.
+- Si una cuenta nueva verifica el correo desde otro dispositivo y no conserva los datos del formulario, inicia sesión, vuelve a Registro, completa empresa y aceptación legal y usa «Continuar con Google / sesión activa»; el backend reutiliza la sesión Firebase verificada.
 - Los usuarios creados por un administrador también deben verificar su correo en su primer acceso. El administrador entrega la contraseña temporal usando un canal seguro.
 - Una cuenta anterior que ya tenga una identidad Firebase con ese correo debe usar el restablecimiento de contraseña de Firebase; no se sobrescribe una identidad existente.
 - Los nuevos usuarios con correo se guardan en PostgreSQL al autenticarse después de verificar el correo. Las cuentas nuevas con Google, que ya tiene el correo verificado, se crean al completar el formulario de empresa.
