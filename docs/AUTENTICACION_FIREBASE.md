@@ -18,7 +18,7 @@ Obtén una cuenta de servicio desde Google Cloud Console para el proyecto `fliig
 2. Ejecuta `migrations/003_firebase_auth.sql` una vez en la base PostgreSQL usada por Render.
 3. Configura las tres variables anteriores en Render y despliega el backend.
 4. Despliega el frontend. La configuración web pública de Firebase está en `js/firebase-client.js`; no contiene credenciales de Admin SDK.
-5. En Firebase Authentication, autoriza los dominios reales de Hosting y cualquier dominio local utilizado para desarrollo.
+5. En Firebase Authentication, autoriza los dominios reales de Hosting y cualquier dominio local utilizado para desarrollo (por ejemplo, `localhost` o `127.0.0.1`).
 6. Prueba registro con correo, el enlace de verificación, Google, restablecimiento de contraseña, una cuenta anterior y una cuenta de empleado.
 
 Los endpoints `/api/auth/login` y `/api/auth/register-tenant` ya no se utilizan ni están publicados: el acceso se realiza mediante `/api/auth/firebase-session`, que rechaza tokens sin correo verificado.

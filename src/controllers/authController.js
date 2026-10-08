@@ -174,10 +174,11 @@ exports.migrateLegacyAccount = async (req, res) => {
       return res.status(401).json({ success: false, error: 'No se pudo verificar la cuenta con esas credenciales.' });
     }
 
+    const migratedPassword = password.length >= 6 ? password : crypto.randomBytes(32).toString('hex');
     try {
       await firebaseAdmin.auth().createUser({
         email: user.email,
-        password,
+        password: migratedPassword,
         displayName: user.nombre,
         emailVerified: false
       });
@@ -193,6 +194,7 @@ exports.migrateLegacyAccount = async (req, res) => {
 
     res.status(201).json({
       success: true,
+      password_reset_required: migratedPassword !== password,
       message: 'Cuenta preparada. Inicia sesión para recibir el correo de verificación.'
     });
   } catch (error) {
