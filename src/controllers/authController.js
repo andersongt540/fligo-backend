@@ -37,7 +37,7 @@ function createSession(user, res) {
 }
 
 exports.firebaseSession = async (req, res) => {
-  const { idToken, registro } = req.body;
+  const { idToken, registro } = req.body || {};
   if (!idToken) {
     return res.status(400).json({ success: false, error: 'Falta la credencial de Firebase.' });
   }
@@ -57,6 +57,10 @@ exports.firebaseSession = async (req, res) => {
       name: decodedToken.name || decodedToken.email.split('@')[0]
     };
   } catch (error) {
+    if (error.code === 'firebase/configuration-error') {
+      console.error('Configuración de Firebase incompleta [Fligo]:', error.message);
+      return res.status(500).json({ success: false, error: 'La autenticación no está configurada en el servidor. Contacta al administrador.' });
+    }
     console.error('Error al verificar identidad de Firebase [Fligo]:', error);
     return res.status(401).json({ success: false, error: 'La sesión de Firebase no es válida. Inicia sesión nuevamente.' });
   }
@@ -153,8 +157,8 @@ exports.firebaseSession = async (req, res) => {
 };
 
 exports.migrateLegacyAccount = async (req, res) => {
-  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  const password = req.body.password;
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = req.body?.password;
   if (!email || typeof password !== 'string' || !password) {
     return res.status(400).json({ success: false, error: 'Ingresa el correo y contraseña actuales de tu cuenta.' });
   }
@@ -198,14 +202,14 @@ exports.migrateLegacyAccount = async (req, res) => {
 };
 
 exports.createEmpleado = async (req, res) => {
-  const { nombre, email: rawEmail, password, rol, tienda_id } = req.body;
+  const { nombre, email: rawEmail, password, rol, tienda_id } = req.body || {};
   const email = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : '';
   const tenant_id = req.user.tenant_id;
 
   if (!nombre || !email || !password || !rol) {
     return res.status(400).json({ success: false, error: 'Todos los campos obligatorios deben ser proporcionados.' });
   }
-  if (!['MANAGER', 'EMPLOYEE'].includes(rol) || password.length < 6) {
+  if (!['MANAGER', 'EMPLOYEE'].includes(rol) || typeof password !== 'string' || password.length < 6) {
     return res.status(400).json({ success: false, error: 'El rol o la contraseña proporcionados no son válidos.' });
   }
 

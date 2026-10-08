@@ -1,4 +1,5 @@
-const admin = require('firebase-admin');
+const { cert, initializeApp } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
 
 let initializedApp;
 
@@ -9,16 +10,18 @@ function getApp() {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 
   if (!projectId || !clientEmail || !privateKey) {
-    throw new Error('FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL y FIREBASE_PRIVATE_KEY deben configurarse en Render.');
+    const error = new Error('FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL y FIREBASE_PRIVATE_KEY deben configurarse en Render.');
+    error.code = 'firebase/configuration-error';
+    throw error;
   }
 
-  initializedApp = admin.initializeApp({
-    credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
+  initializedApp = initializeApp({
+    credential: cert({ projectId, clientEmail, privateKey }),
     projectId
   });
   return initializedApp;
 }
 
 module.exports = {
-  auth: () => getApp().auth()
+  auth: () => getAuth(getApp())
 };
