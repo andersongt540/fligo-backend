@@ -65,8 +65,9 @@ exports.firebaseSession = async (req, res) => {
     return res.status(401).json({ success: false, error: 'La sesión de Firebase no es válida. Inicia sesión nuevamente.' });
   }
 
-  const client = await db.pool.connect();
+  let client;
   try {
+    client = await db.pool.connect();
     await client.query('BEGIN');
     let userResult = await client.query(
       `SELECT u.id, u.firebase_uid, u.tenant_id, u.tienda_id, u.nombre, u.email, u.rol, u.activo,
@@ -148,11 +149,17 @@ exports.firebaseSession = async (req, res) => {
     await client.query('COMMIT');
     createSession(user, res);
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        console.error('Error al revertir la sesión de Firebase [Fligo]:', rollbackError);
+      }
+    }
     console.error('Error al iniciar sesión con Firebase [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error interno del servidor al iniciar sesión.' });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 };
 
