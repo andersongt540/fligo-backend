@@ -40,7 +40,13 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+docs/
+  SUSCRIPCIONES.md
+migrations/
+  001_suscripciones.sql
 src/
+  certs/
+    sectigo-public-server-authentication-ca-dv-r36.pem
   config/
     db.js
   controllers/
@@ -51,9 +57,11 @@ src/
     leadController.js
     productoController.js
     reporteController.js
+    suscripcionController.js
     ventaController.js
   middlewares/
     authMiddleware.js
+    verificarAdminSuscripciones.js
   routes/
     authRoutes.js
     clienteRoutes.js
@@ -62,6 +70,7 @@ src/
     leadRoutes.js
     productoRoutes.js
     reporteRoutes.js
+    suscripcionRoutes.js
     ventaRoutes.js
   app.js
 .gitattributes
@@ -71,6 +80,80 @@ package.json
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="migrations/001_suscripciones.sql">
+ALTER TABLE tenants
+  ADD COLUMN IF NOT EXISTS suscripcion_hasta TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS solicitudes_suscripcion (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  plan VARCHAR(20) NOT NULL CHECK (plan IN ('diaria', 'semanal', 'mensual')),
+  precio_usd NUMERIC(10, 2) NOT NULL CHECK (precio_usd > 0),
+  tasa_bcv NUMERIC(14, 6) NOT NULL CHECK (tasa_bcv > 0),
+  monto_bs NUMERIC(14, 2) NOT NULL CHECK (monto_bs > 0),
+  telefono_pagador VARCHAR(24) NOT NULL,
+  documento_pagador VARCHAR(20) NOT NULL,
+  referencia_pago VARCHAR(24) NOT NULL,
+  fecha_pago DATE NOT NULL,
+  estado VARCHAR(20) NOT NULL DEFAULT 'PENDIENTE'
+    CHECK (estado IN ('PENDIENTE', 'APROBADA', 'RECHAZADA')),
+  comentario_revision VARCHAR(500),
+  revisada_por UUID REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado_en TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  revisado_en TIMESTAMPTZ,
+  UNIQUE (fecha_pago, referencia_pago)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_suscripciones_una_pendiente_por_empresa
+  ON solicitudes_suscripcion (tenant_id)
+  WHERE estado = 'PENDIENTE';
+
+CREATE INDEX IF NOT EXISTS idx_suscripciones_estado_fecha
+  ON solicitudes_suscripcion (estado, creado_en);
+
+CREATE INDEX IF NOT EXISTS idx_suscripciones_tenant_fecha
+  ON solicitudes_suscripcion (tenant_id, creado_en DESC);
+</file>
+
+<file path="src/certs/sectigo-public-server-authentication-ca-dv-r36.pem">
+-----BEGIN CERTIFICATE-----
+MIIGTDCCBDSgAwIBAgIQOXpmzCdWNi4NqofKbqvjsTANBgkqhkiG9w0BAQwFADBf
+MQswCQYDVQQGEwJHQjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQD
+Ey1TZWN0aWdvIFB1YmxpYyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gUm9vdCBSNDYw
+HhcNMjEwMzIyMDAwMDAwWhcNMzYwMzIxMjM1OTU5WjBgMQswCQYDVQQGEwJHQjEY
+MBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTcwNQYDVQQDEy5TZWN0aWdvIFB1Ymxp
+YyBTZXJ2ZXIgQXV0aGVudGljYXRpb24gQ0EgRFYgUjM2MIIBojANBgkqhkiG9w0B
+AQEFAAOCAY8AMIIBigKCAYEAljZf2HIz7+SPUPQCQObZYcrxLTHYdf1ZtMRe7Yeq
+RPSwygz16qJ9cAWtWNTcuICc++p8Dct7zNGxCpqmEtqifO7NvuB5dEVexXn9RFFH
+12Hm+NtPRQgXIFjx6MSJcNWuVO3XGE57L1mHlcQYj+g4hny90aFh2SCZCDEVkAja
+EMMfYPKuCjHuuF+bzHFb/9gV8P9+ekcHENF2nR1efGWSKwnfG5RawlkaQDpRtZTm
+M64TIsv/r7cyFO4nSjs1jLdXYdz5q3a4L0NoabZfbdxVb+CUEHfB0bpulZQtH1Rv
+38e/lIdP7OTTIlZh6OYL6NhxP8So0/sht/4J9mqIGxRFc0/pC8suja+wcIUna0HB
+pXKfXTKpzgis+zmXDL06ASJf5E4A2/m+Hp6b84sfPAwQ766rI65mh50S0Di9E3Pn
+2WcaJc+PILsBmYpgtmgWTR9eV9otfKRUBfzHUHcVgarub/XluEpRlTtZudU5xbFN
+xx/DgMrXLUAPaI60fZ6wA+PTAgMBAAGjggGBMIIBfTAfBgNVHSMEGDAWgBRWc1hk
+lfmSGrASKgRieaFAFYghSTAdBgNVHQ4EFgQUaMASFhgOr872h6YyV6NGUV3LBycw
+DgYDVR0PAQH/BAQDAgGGMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0lBBYwFAYI
+KwYBBQUHAwEGCCsGAQUFBwMCMBsGA1UdIAQUMBIwBgYEVR0gADAIBgZngQwBAgEw
+VAYDVR0fBE0wSzBJoEegRYZDaHR0cDovL2NybC5zZWN0aWdvLmNvbS9TZWN0aWdv
+UHVibGljU2VydmVyQXV0aGVudGljYXRpb25Sb290UjQ2LmNybDCBhAYIKwYBBQUH
+AQEEeDB2ME8GCCsGAQUFBzAChkNodHRwOi8vY3J0LnNlY3RpZ28uY29tL1NlY3Rp
+Z29QdWJsaWNTZXJ2ZXJBdXRoZW50aWNhdGlvblJvb3RSNDYucDdjMCMGCCsGAQUF
+BzABhhdodHRwOi8vb2NzcC5zZWN0aWdvLmNvbTANBgkqhkiG9w0BAQwFAAOCAgEA
+YtOC9Fy+TqECFw40IospI92kLGgoSZGPOSQXMBqmsGWZUQ7rux7cj1du6d9rD6C8
+ze1B2eQjkrGkIL/OF1s7vSmgYVafsRoZd/IHUrkoQvX8FZwUsmPu7amgBfaY3g+d
+q1x0jNGKb6I6Bzdl6LgMD9qxp+3i7GQOnd9J8LFSietY6Z4jUBzVoOoz8iAU84OF
+h2HhAuiPw1ai0VnY38RTI+8kepGWVfGxfBWzwH9uIjeooIeaosVFvE8cmYUB4TSH
+5dUyD0jHct2+8ceKEtIoFU/FfHq/mDaVnvcDCZXtIgitdMFQdMZaVehmObyhRdDD
+4NQCs0gaI9AAgFj4L9QtkARzhQLNyRf87Kln+YU0lgCGr9HLg3rGO8q+Y4ppLsOd
+unQZ6ZxPNGIfOApbPVf5hCe58EZwiWdHIMn9lPP6+F404y8NNugbQixBber+x536
+WrZhFZLjEkhp7fFXf9r32rNPfb74X/U90Bdy4lzp3+X1ukh1BuMxA/EEhDoTOS3l
+7ABvc7BYSQubQ2490OcdkIzUh3ZwDrakMVrbaTxUM2p24N6dB+ns2zptWCva6jzW
+r8IWKIMxzxLPv5Kt3ePKcUdvkBU/smqujSczTzzSjIoR5QqQA6lN1ZRSnuHIWCvh
+JEltkYnTAH41QJ6SAWO66GrrUESwN/cgZzL4JLEqz1Y=
+-----END CERTIFICATE-----
+</file>
 
 <file path="src/config/db.js">
 const { Pool } = require('pg');
@@ -330,203 +413,6 @@ exports.getProfile = async (req, res) => {
 };
 </file>
 
-<file path="src/controllers/clienteController.js">
-const db = require('../config/db');
-
-// 1. Crear un nuevo cliente en Fligo
-exports.crearCliente = async (req, res) => {
-  const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
-  const tenant_id = req.user.tenant_id; // Garantiza aislamiento Multi-Tenant
-  
-  // Si no se especifica tienda_id, asigna la tienda del usuario conectado
-  const tiendaAsignada = tienda_id || req.user.tienda_id;
-
-  if (!nombre) {
-    return res.status(400).json({ success: false, error: 'El nombre del cliente es obligatorio.' });
-  }
-
-  try {
-    const result = await db.query(
-      `INSERT INTO clientes (tenant_id, tienda_id, nombre, documento_identidad, email, telefono, direccion, categoria, notas)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING *`,
-      [tenant_id, tiendaAsignada, nombre, documento_identidad || null, email || null, telefono || null, direccion || null, categoria || 'General', notas || null]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Cliente registrado con éxito en Fligo.',
-      data: result.rows[0]
-    });
-  } catch (error) {
-    console.error('Error en crearCliente [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al registrar el cliente.' });
-  }
-};
-
-// 2. Obtener lista de clientes con filtros y paginación
-exports.obtenerClientes = async (req, res) => {
-  const tenant_id = req.user.tenant_id;
-  const { busqueda, categoria, tienda_id, page = 1, limit = 20 } = req.query;
-
-  const offset = (page - 1) * limit;
-  let params = [tenant_id];
-  let conditions = ['tenant_id = $1', 'activo = TRUE'];
-
-  // Filtro por tienda si el usuario es un empleado con tienda asignada
-  if (req.user.rol === 'EMPLOYEE' && req.user.tienda_id) {
-    params.push(req.user.tienda_id);
-    conditions.push(`tienda_id = $${params.length}`);
-  } else if (tienda_id) {
-    params.push(tienda_id);
-    conditions.push(`tienda_id = $${params.length}`);
-  }
-
-  // Filtro por categoría
-  if (categoria) {
-    params.push(categoria);
-    conditions.push(`categoria = $${params.length}`);
-  }
-
-  // Búsqueda por Nombre, Email o Documento de Identidad
-  if (busqueda) {
-    params.push(`%${busqueda}%`);
-    conditions.push(`(nombre ILIKE $${params.length} OR email ILIKE $${params.length} OR documento_identidad ILIKE $${params.length})`);
-  }
-
-  const whereClause = conditions.join(' AND ');
-
-  try {
-    // Consulta de los clientes
-    const clientesQuery = `
-      SELECT c.*, t.nombre as nombre_tienda 
-      FROM clientes c
-      LEFT JOIN tiendas t ON c.tienda_id = t.id
-      WHERE ${whereClause}
-      ORDER BY c.creado_en DESC
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-    `;
-    
-    // Consulta de total para la paginación
-    const totalQuery = `SELECT COUNT(*) FROM clientes WHERE ${whereClause}`;
-
-    const [clientesRes, totalRes] = await Promise.all([
-      db.query(clientesQuery, [...params, limit, offset]),
-      db.query(totalQuery, params)
-    ]);
-
-    const total = parseInt(totalRes.rows[0].count);
-
-    res.json({
-      success: true,
-      data: clientesRes.rows,
-      pagination: {
-        total,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    console.error('Error en obtenerClientes [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al obtener la lista de clientes.' });
-  }
-};
-
-// 3. Obtener detalle de un cliente por ID
-exports.obtenerClientePorId = async (req, res) => {
-  const { id } = req.params;
-  const tenant_id = req.user.tenant_id;
-
-  try {
-    const result = await db.query(
-      `SELECT c.*, t.nombre as nombre_tienda 
-       FROM clientes c
-       LEFT JOIN tiendas t ON c.tienda_id = t.id
-       WHERE c.id = $1 AND c.tenant_id = $2 AND c.activo = TRUE`,
-      [id, tenant_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Cliente no encontrado en Fligo.' });
-    }
-
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error('Error en obtenerClientePorId [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al obtener los detalles del cliente.' });
-  }
-};
-
-// 4. Actualizar cliente
-exports.actualizarCliente = async (req, res) => {
-  const { id } = req.params;
-  const tenant_id = req.user.tenant_id;
-  const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
-
-  try {
-    const checkCliente = await db.query(
-      'SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2 AND activo = TRUE',
-      [id, tenant_id]
-    );
-
-    if (checkCliente.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Cliente no encontrado o sin autorización.' });
-    }
-
-    const result = await db.query(
-      `UPDATE clientes 
-       SET nombre = COALESCE($1, nombre),
-           documento_identidad = COALESCE($2, documento_identidad),
-           email = COALESCE($3, email),
-           telefono = COALESCE($4, telefono),
-           direccion = COALESCE($5, direccion),
-           categoria = COALESCE($6, categoria),
-           notas = COALESCE($7, notas),
-           tienda_id = COALESCE($8, tienda_id),
-           actualizado_en = CURRENT_TIMESTAMP
-       WHERE id = $9 AND tenant_id = $10
-       RETURNING *`,
-      [nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id, id, tenant_id]
-    );
-
-    res.json({
-      success: true,
-      message: 'Cliente actualizado correctamente en Fligo.',
-      data: result.rows[0]
-    });
-  } catch (error) {
-    console.error('Error en actualizarCliente [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al actualizar el cliente.' });
-  }
-};
-
-// 5. Eliminar cliente (Eliminación lógica)
-exports.eliminarCliente = async (req, res) => {
-  const { id } = req.params;
-  const tenant_id = req.user.tenant_id;
-
-  try {
-    const result = await db.query(
-      `UPDATE clientes 
-       SET activo = FALSE, actualizado_en = CURRENT_TIMESTAMP 
-       WHERE id = $1 AND tenant_id = $2 
-       RETURNING id`,
-      [id, tenant_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Cliente no encontrado o sin autorización.' });
-    }
-
-    res.json({ success: true, message: 'Cliente eliminado correctamente de Fligo.' });
-  } catch (error) {
-    console.error('Error en eliminarCliente [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al eliminar el cliente.' });
-  }
-};
-</file>
-
 <file path="src/controllers/comunicacionController.js">
 const db = require('../config/db');
 
@@ -599,112 +485,6 @@ exports.obtenerInteracciones = async (req, res) => {
   } catch (error) {
     console.error('Error en obtenerInteracciones [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error al consultar el historial de comunicación.' });
-  }
-};
-</file>
-
-<file path="src/controllers/configuracionController.js">
-const db = require('../config/db');
-
-// 1. Obtener o crear configuración global de la empresa
-exports.obtenerConfiguracion = async (req, res) => {
-  const tenant_id = req.user.tenant_id;
-
-  try {
-    let result = await db.query(
-      `SELECT c.*, t.nombre_empresa, t.plan 
-       FROM configuracion_empresa c
-       RIGHT JOIN tenants t ON c.tenant_id = t.id
-       WHERE t.id = $1`,
-      [tenant_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Empresa no encontrada.' });
-    }
-
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error('Error en obtenerConfiguracion [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al obtener la configuración de la empresa.' });
-  }
-};
-
-// 2. Actualizar configuración de la empresa (Moneda, Tasa, Impuestos)
-exports.actualizarConfiguracion = async (req, res) => {
-  const tenant_id = req.user.tenant_id;
-  const { logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal } = req.body;
-
-  try {
-    const result = await db.query(
-      `INSERT INTO configuracion_empresa (tenant_id, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (tenant_id) DO UPDATE SET
-         logo_url = COALESCE(EXCLUDED.logo_url, configuracion_empresa.logo_url),
-         moneda_principal = COALESCE(EXCLUDED.moneda_principal, configuracion_empresa.moneda_principal),
-         simbolo_moneda = COALESCE(EXCLUDED.simbolo_moneda, configuracion_empresa.simbolo_moneda),
-         impuesto_defecto = COALESCE(EXCLUDED.impuesto_defecto, configuracion_empresa.impuesto_defecto),
-         tasa_cambio = COALESCE(EXCLUDED.tasa_cambio, configuracion_empresa.tasa_cambio),
-         direccion_fiscal = COALESCE(EXCLUDED.direccion_fiscal, configuracion_empresa.direccion_fiscal),
-         documento_fiscal = COALESCE(EXCLUDED.documento_fiscal, configuracion_empresa.documento_fiscal),
-         actualizado_en = CURRENT_TIMESTAMP
-       RETURNING *`,
-      [tenant_id, logo_url || null, moneda_principal || 'USD', simbolo_moneda || '$', impuesto_defecto || 16.00, tasa_cambio || 1.0000, direccion_fiscal || null, documento_fiscal || null]
-    );
-
-    res.json({
-      success: true,
-      message: 'Configuración de la empresa actualizada con éxito en Fligo.',
-      data: result.rows[0]
-    });
-  } catch (error) {
-    console.error('Error en actualizarConfiguracion [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al guardar la configuración.' });
-  }
-};
-
-// 3. Crear nueva Sucursal / Tienda en la Empresa
-exports.crearTienda = async (req, res) => {
-  const { nombre, direccion, telefono } = req.body;
-  const tenant_id = req.user.tenant_id;
-
-  if (!nombre) {
-    return res.status(400).json({ success: false, error: 'El nombre de la tienda es obligatorio.' });
-  }
-
-  try {
-    const result = await db.query(
-      `INSERT INTO tiendas (tenant_id, nombre, direccion, telefono)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [tenant_id, nombre, direccion || null, telefono || null]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Nueva tienda registrada en Fligo.',
-      data: result.rows[0]
-    });
-  } catch (error) {
-    console.error('Error en crearTienda [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al crear la tienda.' });
-  }
-};
-
-// 4. Listar todas las tiendas de la empresa
-exports.obtenerTiendas = async (req, res) => {
-  const tenant_id = req.user.tenant_id;
-
-  try {
-    const result = await db.query(
-      `SELECT * FROM tiendas WHERE tenant_id = $1 AND activa = TRUE ORDER BY creado_en ASC`,
-      [tenant_id]
-    );
-
-    res.json({ success: true, data: result.rows });
-  } catch (error) {
-    console.error('Error en obtenerTiendas [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al obtener la lista de tiendas.' });
   }
 };
 </file>
@@ -1257,272 +1037,240 @@ exports.obtenerRankingVendedores = async (req, res) => {
 };
 </file>
 
-<file path="src/controllers/ventaController.js">
+<file path="src/controllers/suscripcionController.js">
 const db = require('../config/db');
+const { obtenerDatosTasasBcv } = require('./configuracionController');
 
-// 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
-exports.registrarVenta = async (req, res) => {
-  const { cliente_id, productos, metodo_pago, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
-  const tenant_id = req.user.tenant_id;
-  const targetTiendaId = tienda_id || req.user.tienda_id;
+const PLANES = Object.freeze({
+  diaria: { nombre: 'Diaria', precio_usd: 3, dias: 1 },
+  semanal: { nombre: 'Semanal', precio_usd: 7, dias: 7 },
+  mensual: { nombre: 'Mensual', precio_usd: 20, dias: 30 }
+});
 
-  if (!productos || !Array.isArray(productos) || productos.length === 0) {
-    return res.status(400).json({ success: false, error: 'La venta debe contener al menos un producto.' });
-  }
+function pagoMovilDestino() {
+  return {
+    banco: process.env.PAGO_MOVIL_BANCO || '',
+    telefono: process.env.PAGO_MOVIL_TELEFONO || '',
+    documento: process.env.PAGO_MOVIL_DOCUMENTO || '',
+    titular: process.env.PAGO_MOVIL_TITULAR || ''
+  };
+}
 
-  if (!metodo_pago) {
-    return res.status(400).json({ success: false, error: 'Debes especificar el método de pago.' });
-  }
+function destinoConfigurado(destino) {
+  return Boolean(destino.banco && destino.telefono && destino.documento);
+}
 
-  if (!targetTiendaId) {
-    return res.status(400).json({ success: false, error: 'Debes especificar la tienda donde se realiza la venta.' });
-  }
-
-  const client = await db.pool.connect();
-
+exports.obtenerSuscripcion = async (req, res) => {
   try {
-    await client.query('BEGIN');
-
-    let subtotalCalculado = 0;
-    const itemsProcesados = [];
-
-    // Validar productos y verificar stock disponible en la tienda
-    for (const item of productos) {
-      const prodRes = await client.query(
-        `SELECT p.id, p.precio_base, COALESCE(i.stock_actual, 0) as stock_actual
-         FROM productos p
-         LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $1
-         WHERE p.id = $2 AND p.tenant_id = $3 AND p.activo = TRUE
-         FOR UPDATE`,
-        [targetTiendaId, item.producto_id, tenant_id]
-      );
-
-      if (prodRes.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ success: false, error: `Producto ID ${item.producto_id} no encontrado en la empresa.` });
-      }
-
-      const prod = prodRes.rows[0];
-
-      if (prod.stock_actual < item.cantidad) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ 
-          success: false, 
-          error: `Stock insuficiente para el producto ID ${item.producto_id}. Disponible: ${prod.stock_actual}, Solicitado: ${item.cantidad}` 
-        });
-      }
-
-      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
-      const subtotalItem = precioUnitario * item.cantidad;
-      subtotalCalculado += subtotalItem;
-
-      itemsProcesados.push({
-        producto_id: prod.id,
-        cantidad: item.cantidad,
-        precio_unitario: precioUnitario,
-        subtotal: subtotalItem,
-        stock_actual: prod.stock_actual
-      });
+    let tasaBcv = null;
+    let errorTasa = null;
+    try {
+      tasaBcv = await obtenerDatosTasasBcv();
+    } catch (error) {
+      errorTasa = 'No se pudo consultar la tasa del BCV. Intenta actualizar más tarde.';
+      console.error('Error en obtenerSuscripcion [BCV]:', error);
     }
 
-    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+    const [tenantResult, requestsResult] = await Promise.all([
+      db.query(
+        'SELECT plan, suscripcion_hasta FROM tenants WHERE id = $1',
+        [req.user.tenant_id]
+      ),
+      db.query(
+        `SELECT id, plan, precio_usd, tasa_bcv, monto_bs, referencia_pago, fecha_pago,
+                estado, comentario_revision, creado_en, revisado_en
+         FROM solicitudes_suscripcion
+         WHERE tenant_id = $1
+         ORDER BY creado_en DESC
+         LIMIT 10`,
+        [req.user.tenant_id]
+      )
+    ]);
 
-    // Insertar Cabecera de Venta
-    const ventaRes = await client.query(
-      `INSERT INTO ventas (tenant_id, tienda_id, cliente_id, usuario_id, cotizacion_id, metodo_pago, subtotal, impuesto, descuento, total, notas)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING *`,
-      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodo_pago, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
-    );
-
-    const nuevaVenta = ventaRes.rows[0];
-
-    // Insertar Detalle y Descontar Inventario
-    for (const item of itemsProcesados) {
-      await client.query(
-        `INSERT INTO detalle_venta (venta_id, producto_id, cantidad, precio_unitario, subtotal)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [nuevaVenta.id, item.producto_id, item.cantidad, item.precio_unitario, item.subtotal]
-      );
-
-      const nuevoStock = item.stock_actual - item.cantidad;
-
-      // Actualizar Stock de la Tienda
-      await client.query(
-        `UPDATE inventario_tienda
-         SET stock_actual = $1, actualizado_en = CURRENT_TIMESTAMP
-         WHERE tenant_id = $2 AND tienda_id = $3 AND producto_id = $4`,
-        [nuevoStock, tenant_id, targetTiendaId, item.producto_id]
-      );
-
-      // Registrar movimiento de auditoría
-      await client.query(
-        `INSERT INTO movimientos_inventario (tenant_id, tienda_id, producto_id, usuario_id, tipo_movimiento, cantidad, stock_resultante, motivo)
-         VALUES ($1, $2, $3, $4, 'VENTA', $5, $6, $7)`,
-        [tenant_id, targetTiendaId, item.producto_id, req.user.user_id, item.cantidad, nuevoStock, `Venta registrada ID: ${nuevaVenta.id}`]
-      );
+    if (!tenantResult.rows.length) {
+      return res.status(404).json({ success: false, error: 'Empresa no encontrada.' });
     }
 
-    // Si provenía de una cotización, marcarla como CONVERTIDA
-    if (cotizacion_id) {
-      await client.query(
-        `UPDATE cotizaciones SET estado = 'CONVERTIDA' WHERE id = $1 AND tenant_id = $2`,
-        [cotizacion_id, tenant_id]
-      );
-    }
-
-    await client.query('COMMIT');
-
-    res.status(201).json({
+    const destino = pagoMovilDestino();
+    return res.json({
       success: true,
-      message: 'Venta registrada con éxito en Fligo.',
-      data: nuevaVenta
+      data: {
+        planes: Object.entries(PLANES).map(([id, plan]) => ({ id, ...plan })),
+        tasa_bcv: tasaBcv,
+        error_tasa: errorTasa,
+        pago_movil: { destino, configurado: destinoConfigurado(destino) },
+        es_admin_plataforma: req.user.rol === 'SUPERADMIN'
+          || (req.user.rol === 'OWNER' && process.env.FLIGO_PLATFORM_TENANT_ID === req.user.tenant_id),
+        suscripcion: tenantResult.rows[0],
+        solicitudes: requestsResult.rows
+      }
     });
-
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Error en registrarVenta [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al procesar la venta.' });
-  } finally {
-    client.release();
+    console.error('Error en obtenerSuscripcion [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo cargar el módulo de suscripciones.' });
   }
 };
 
-// 2. Crear Cotización / Presupuesto
-exports.crearCotizacion = async (req, res) => {
-  const { cliente_id, productos, descuento = 0, impuesto = 0, notas, tienda_id } = req.body;
-  const tenant_id = req.user.tenant_id;
-  const targetTiendaId = tienda_id || req.user.tienda_id;
+exports.crearSolicitud = async (req, res) => {
+  const { plan, telefono, documento, monto_bs, referencia_pago, fecha_pago } = req.body;
+  const oferta = PLANES[plan];
 
-  if (!productos || !Array.isArray(productos) || productos.length === 0) {
-    return res.status(400).json({ success: false, error: 'La cotización debe incluir al menos un producto.' });
+  if (!oferta) {
+    return res.status(400).json({ success: false, error: 'Selecciona un plan válido.' });
+  }
+  if (typeof telefono !== 'string' || !/^[+\d\s().-]{7,24}$/.test(telefono.trim())) {
+    return res.status(400).json({ success: false, error: 'Ingresa un teléfono válido.' });
+  }
+  if (typeof documento !== 'string' || !/^[VEJPG]?[-\s]?\d{5,12}$/i.test(documento.trim())) {
+    return res.status(400).json({ success: false, error: 'Ingresa una cédula o documento válido.' });
+  }
+  if (typeof referencia_pago !== 'string' || !/^[a-z0-9-]{4,24}$/i.test(referencia_pago.trim())) {
+    return res.status(400).json({ success: false, error: 'La referencia debe tener entre 4 y 24 caracteres alfanuméricos.' });
+  }
+  if (typeof fecha_pago !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha_pago)
+    || Number.isNaN(Date.parse(`${fecha_pago}T00:00:00Z`))
+    || new Date(`${fecha_pago}T00:00:00Z`).toISOString().slice(0, 10) !== fecha_pago) {
+    return res.status(400).json({ success: false, error: 'Ingresa la fecha del Pago Móvil.' });
+  }
+  if (!Number.isFinite(Number(monto_bs)) || Number(monto_bs) <= 0) {
+    return res.status(400).json({ success: false, error: 'Ingresa un monto válido en bolívares.' });
   }
 
-  const client = await db.pool.connect();
+  const destino = pagoMovilDestino();
+  if (!destinoConfigurado(destino)) {
+    return res.status(503).json({ success: false, error: 'Fligo aún no ha configurado los datos para recibir pagos. Intenta más tarde.' });
+  }
+
+  let tasas;
+  try {
+    tasas = await obtenerDatosTasasBcv();
+  } catch (error) {
+    console.error('Error en crearSolicitudSuscripcion [BCV]:', error);
+    return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa del BCV para validar el monto. Intenta más tarde.' });
+  }
+
+  const montoEsperadoCentimos = Math.round(oferta.precio_usd * tasas.usd_ves * 100);
+  const montoEnviadoCentimos = Math.round(Number(monto_bs) * 100);
+  if (montoEsperadoCentimos !== montoEnviadoCentimos) {
+    return res.status(400).json({
+      success: false,
+      error: `El monto no coincide con el precio del plan a la tasa BCV actual (${(montoEsperadoCentimos / 100).toFixed(2)} Bs.). Actualiza la tasa y confirma el pago.`
+    });
+  }
 
   try {
-    await client.query('BEGIN');
-
-    let subtotalCalculado = 0;
-    const itemsProcesados = [];
-
-    for (const item of productos) {
-      const prodRes = await client.query(
-        `SELECT id, precio_base FROM productos WHERE id = $1 AND tenant_id = $2 AND activo = TRUE`,
-        [item.producto_id, tenant_id]
-      );
-
-      if (prodRes.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ success: false, error: `Producto ID ${item.producto_id} no encontrado.` });
-      }
-
-      const prod = prodRes.rows[0];
-      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
-      const subtotalItem = precioUnitario * item.cantidad;
-      subtotalCalculado += subtotalItem;
-
-      itemsProcesados.push({
-        producto_id: prod.id,
-        cantidad: item.cantidad,
-        precio_unitario: precioUnitario,
-        subtotal: subtotalItem
-      });
-    }
-
-    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
-
-    const cotRes = await client.query(
-      `INSERT INTO cotizaciones (tenant_id, tienda_id, cliente_id, usuario_id, subtotal, impuesto, descuento, total, notas)
+    const result = await db.query(
+      `INSERT INTO solicitudes_suscripcion
+         (tenant_id, plan, precio_usd, tasa_bcv, monto_bs, telefono_pagador, documento_pagador, referencia_pago, fecha_pago)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING *`,
-      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
+       RETURNING id, plan, precio_usd, tasa_bcv, monto_bs, referencia_pago, fecha_pago, estado, creado_en`,
+      [
+        req.user.tenant_id,
+        plan,
+        oferta.precio_usd,
+        tasas.usd_ves,
+        montoEsperadoCentimos / 100,
+        telefono.trim(),
+        documento.trim().toUpperCase(),
+        referencia_pago.trim(),
+        fecha_pago
+      ]
     );
-
-    const nuevaCotizacion = cotRes.rows[0];
-
-    for (const item of itemsProcesados) {
-      await client.query(
-        `INSERT INTO detalle_cotizacion (cotizacion_id, producto_id, cantidad, precio_unitario, subtotal)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [nuevaCotizacion.id, item.producto_id, item.cantidad, item.precio_unitario, item.subtotal]
-      );
-    }
-
-    await client.query('COMMIT');
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      message: 'Cotización creada exitosamente en Fligo.',
-      data: nuevaCotizacion
+      message: 'Solicitud enviada. La suscripción se activará cuando se verifique el pago.',
+      data: result.rows[0]
     });
-
   } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Error en crearCotizacion [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al generar la cotización.' });
-  } finally {
-    client.release();
+    if (error.code === '23505') {
+      return res.status(409).json({ success: false, error: 'Ya existe una solicitud pendiente para tu empresa o esa referencia de pago ya fue enviada.' });
+    }
+    console.error('Error en crearSolicitudSuscripcion [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo enviar la solicitud de pago.' });
   }
 };
 
-// 3. Listar Ventas por Tienda con Filtros
-exports.obtenerVentas = async (req, res) => {
-  const tenant_id = req.user.tenant_id;
-  const { tienda_id, fecha_inicio, fecha_fin, page = 1, limit = 20 } = req.query;
-
-  const targetTiendaId = (req.user.rol === 'EMPLOYEE' && req.user.tienda_id)
-    ? req.user.tienda_id
-    : (tienda_id || req.user.tienda_id);
-
-  const offset = (page - 1) * limit;
-  let params = [tenant_id];
-  let conditions = ['v.tenant_id = $1'];
-
-  if (targetTiendaId) {
-    params.push(targetTiendaId);
-    conditions.push(`v.tienda_id = $${params.length}`);
-  }
-
-  if (fecha_inicio) {
-    params.push(fecha_inicio);
-    conditions.push(`v.creado_en >= $${params.length}`);
-  }
-
-  if (fecha_fin) {
-    params.push(fecha_fin);
-    conditions.push(`v.creado_en <= $${params.length}`);
-  }
-
-  const whereClause = conditions.join(' AND ');
-
+exports.listarSolicitudesPendientes = async (req, res) => {
   try {
-    const query = `
-      SELECT v.*, 
-             c.nombre as nombre_cliente, 
-             u.nombre as nombre_vendedor,
-             t.nombre as nombre_tienda
-      FROM ventas v
-      LEFT JOIN clientes c ON v.cliente_id = c.id
-      LEFT JOIN usuarios u ON v.usuario_id = u.id
-      LEFT JOIN tiendas t ON v.tienda_id = t.id
-      WHERE ${whereClause}
-      ORDER BY v.creado_en DESC
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
-    `;
-
-    const result = await db.query(query, [...params, limit, offset]);
-
-    res.json({
-      success: true,
-      data: result.rows,
-      page: parseInt(page),
-      limit: parseInt(limit)
-    });
-
+    const result = await db.query(
+      `SELECT s.id, s.tenant_id, t.nombre_empresa, s.plan, s.precio_usd, s.tasa_bcv,
+              s.monto_bs, s.telefono_pagador, s.documento_pagador, s.referencia_pago,
+              s.fecha_pago, s.creado_en, u.nombre AS nombre_solicitante, u.email AS email_solicitante
+       FROM solicitudes_suscripcion s
+       JOIN tenants t ON t.id = s.tenant_id
+       LEFT JOIN LATERAL (
+         SELECT nombre, email
+         FROM usuarios
+         WHERE tenant_id = t.id AND rol = 'OWNER'
+         ORDER BY creado_en ASC
+         LIMIT 1
+       ) u ON TRUE
+       WHERE s.estado = 'PENDIENTE'
+       ORDER BY s.creado_en ASC
+       LIMIT 100`
+    );
+    return res.json({ success: true, data: result.rows });
   } catch (error) {
-    console.error('Error en obtenerVentas [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al consultar el historial de ventas.' });
+    console.error('Error en listarSolicitudesPendientes [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudieron cargar las solicitudes pendientes.' });
+  }
+};
+
+exports.revisarSolicitud = async (req, res) => {
+  const { estado, comentario } = req.body;
+  if (!['APROBADA', 'RECHAZADA'].includes(estado)) {
+    return res.status(400).json({ success: false, error: 'La revisión debe aprobar o rechazar la solicitud.' });
+  }
+  if (comentario !== undefined && (typeof comentario !== 'string' || comentario.length > 500)) {
+    return res.status(400).json({ success: false, error: 'El comentario no puede superar 500 caracteres.' });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const requestResult = await client.query(
+      `SELECT id, tenant_id, plan
+       FROM solicitudes_suscripcion
+       WHERE id = $1 AND estado = 'PENDIENTE'
+       FOR UPDATE`,
+      [req.params.id]
+    );
+    if (!requestResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'La solicitud no existe o ya fue revisada.' });
+    }
+    const request = requestResult.rows[0];
+
+    if (estado === 'APROBADA') {
+      const duracionDias = PLANES[request.plan]?.dias;
+      if (!duracionDias) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, error: 'El plan de esta solicitud ya no está disponible.' });
+      }
+      await client.query(
+        `UPDATE tenants
+         SET plan = $1,
+             suscripcion_hasta = GREATEST(COALESCE(suscripcion_hasta, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP) + ($2 * INTERVAL '1 day')
+         WHERE id = $3`,
+        [request.plan, duracionDias, request.tenant_id]
+      );
+    }
+
+    const updated = await client.query(
+      `UPDATE solicitudes_suscripcion
+       SET estado = $1, comentario_revision = $2, revisada_por = $3, revisado_en = CURRENT_TIMESTAMP
+       WHERE id = $4
+       RETURNING id, tenant_id, plan, estado, revisado_en`,
+      [estado, comentario?.trim() || null, req.user.user_id, request.id]
+    );
+    await client.query('COMMIT');
+    return res.json({ success: true, data: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en revisarSolicitudSuscripcion [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'No se pudo revisar la solicitud.' });
+  } finally {
+    client.release();
   }
 };
 </file>
@@ -1571,6 +1319,24 @@ module.exports = {
 };
 </file>
 
+<file path="src/middlewares/verificarAdminSuscripciones.js">
+module.exports = (req, res, next) => {
+  const platformTenantId = process.env.FLIGO_PLATFORM_TENANT_ID;
+  const isSuperAdmin = req.user?.rol === 'SUPERADMIN';
+  const isPlatformOwner = req.user?.rol === 'OWNER'
+    && platformTenantId
+    && req.user.tenant_id === platformTenantId;
+
+  if (!isSuperAdmin && !isPlatformOwner) {
+    return res.status(403).json({
+      success: false,
+      error: 'No tienes permisos para revisar pagos de suscripción.'
+    });
+  }
+  next();
+};
+</file>
+
 <file path="src/routes/authRoutes.js">
 const express = require('express');
 const router = express.Router();
@@ -1616,25 +1382,6 @@ router.use(verificarToken);
 
 router.post('/', comunicacionController.registrarInteraccion);
 router.get('/', comunicacionController.obtenerInteracciones);
-
-module.exports = router;
-</file>
-
-<file path="src/routes/configuracionRoutes.js">
-const express = require('express');
-const router = express.Router();
-const configuracionController = require('../controllers/configuracionController');
-const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
-
-router.use(verificarToken);
-
-// Configuración general de la empresa
-router.get('/', configuracionController.obtenerConfiguracion);
-router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
-
-// Gestión de Tiendas / Sucursales
-router.get('/tiendas', configuracionController.obtenerTiendas);
-router.post('/tiendas', autorizarRoles('OWNER'), configuracionController.crearTienda);
 
 module.exports = router;
 </file>
@@ -1688,6 +1435,23 @@ router.get('/vendedores', autorizarRoles('OWNER', 'MANAGER'), reporteController.
 module.exports = router;
 </file>
 
+<file path="src/routes/suscripcionRoutes.js">
+const express = require('express');
+const suscripcionController = require('../controllers/suscripcionController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+const verificarAdminSuscripciones = require('../middlewares/verificarAdminSuscripciones');
+
+const router = express.Router();
+
+router.use(verificarToken);
+router.get('/', suscripcionController.obtenerSuscripcion);
+router.post('/solicitudes', autorizarRoles('OWNER'), suscripcionController.crearSolicitud);
+router.get('/admin/solicitudes', verificarAdminSuscripciones, suscripcionController.listarSolicitudesPendientes);
+router.post('/admin/solicitudes/:id/revisar', verificarAdminSuscripciones, suscripcionController.revisarSolicitud);
+
+module.exports = router;
+</file>
+
 <file path="src/routes/ventaRoutes.js">
 const express = require('express');
 const router = express.Router();
@@ -1704,73 +1468,6 @@ router.get('/ventas', ventaController.obtenerVentas);
 router.post('/cotizaciones', ventaController.crearCotizacion);
 
 module.exports = router;
-</file>
-
-<file path="src/app.js">
-const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
-
-// Importación de Rutas de Todos los Módulos de Fligo
-const authRoutes = require('./routes/authRoutes');
-const clienteRoutes = require('./routes/clienteRoutes');
-const productoRoutes = require('./routes/productoRoutes');
-const ventaRoutes = require('./routes/ventaRoutes');
-const reporteRoutes = require('./routes/reporteRoutes');
-const leadRoutes = require('./routes/leadRoutes');
-const comunicacionRoutes = require('./routes/comunicacionRoutes');
-const configuracionRoutes = require('./routes/configuracionRoutes');
-
-const app = express();
-
-// Middlewares Globales
-app.use(cors());
-app.use(express.json());
-
-// Endpoint de Diagnóstico y Salud de la API
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    app: 'Fligo Engine API', 
-    status: 'ONLINE', 
-    environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date() 
-  });
-});
-
-// Registro de Rutas Mapeadas por Módulo en Fligo
-app.use('/api/auth', authRoutes);
-app.use('/api/clientes', clienteRoutes);
-app.use('/api/productos', productoRoutes);
-app.use('/api/reportes', reporteRoutes);
-app.use('/api/leads', leadRoutes);
-app.use('/api/comunicaciones', comunicacionRoutes);
-app.use('/api/configuracion', configuracionRoutes);
-app.use('/api', ventaRoutes);
-
-// Manejo de Rutas Inexistentes (404)
-app.use((req, res) => {
-  res.status(404).json({ 
-    success: false, 
-    error: 'Ruta no encontrada en Fligo API.' 
-  });
-});
-
-// Manejo Global de Errores (500)
-app.use((err, req, res, next) => {
-  console.error('❌ [Fligo Internal Error]:', err.stack);
-  res.status(500).json({
-    success: false,
-    error: 'Error interno del servidor en Fligo API.'
-  });
-});
-
-const PORT = process.env.PORT || 10000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 [Fligo Engine] Servidor iniciado correctamente en el puerto ${PORT}`);
-});
-
-module.exports = app;
 </file>
 
 <file path=".gitattributes">
@@ -2021,6 +1718,134 @@ CREATE INDEX idx_usuarios_tenant ON usuarios(tenant_id);
 CREATE INDEX idx_usuarios_tienda ON usuarios(tienda_id);
 </file>
 
+<file path="docs/SUSCRIPCIONES.md">
+# Suscripciones y pagos móviles
+
+## Preparación de Render
+
+Antes de usar el módulo:
+
+1. Ejecuta `migrations/001_suscripciones.sql` una sola vez en la base PostgreSQL de Render.
+2. En las variables de entorno del servicio backend configura los datos de recepción de Pago Móvil:
+   - `PAGO_MOVIL_BANCO`
+   - `PAGO_MOVIL_TELEFONO`
+   - `PAGO_MOVIL_DOCUMENTO`
+   - `PAGO_MOVIL_TITULAR` (opcional)
+3. Configura `FLIGO_PLATFORM_TENANT_ID` con el UUID del tenant de la empresa operadora de Fligo. Su usuario `OWNER` puede revisar pagos. Las solicitudes administrativas también aceptan usuarios con rol `SUPERADMIN`.
+
+Para consultar el tenant de la empresa operadora desde PostgreSQL:
+
+```sql
+SELECT id, nombre_empresa
+FROM tenants
+ORDER BY creado_en;
+```
+
+No guardes estos valores en Firebase ni en los archivos del frontend.
+
+## Flujo
+
+- Los planes son diaria (USD 3 por 1 día), semanal (USD 7 por 7 días) y mensual (USD 20 por 30 días).
+- El backend consulta la tasa USD del BCV, calcula el monto en bolívares y compara el monto reportado con el importe esperado en el momento de enviar la solicitud.
+- El titular informa teléfono, documento del pagador, monto, referencia y fecha. No se solicita ni almacena ninguna clave bancaria.
+- En el formulario, el botón verde «Reportar pago» registra la solicitud pendiente y abre WhatsApp con un mensaje preparado que incluye empresa, plan, monto, fecha y referencia. El usuario debe revisar y enviar ese mensaje desde WhatsApp.
+- La solicitud queda `PENDIENTE`. Un usuario administrativo verifica el abono en Mercantil y la aprueba o rechaza desde Fligo.
+- Al aprobar, el plan y la fecha de vencimiento del tenant se actualizan. La duración aprobada se suma al vencimiento vigente si la suscripción aún no ha expirado.
+
+La cuenta personal de Pago Móvil no expone una confirmación automática al backend. Por ello, este flujo no activa pagos por sí solo: la aprobación manual es necesaria hasta contratar una cuenta/API de cobros que permita verificar abonos de manera segura.
+
+El módulo registra la fecha de vencimiento, pero no bloquea actualmente el acceso de una empresa vencida. La aplicación de restricciones requiere definir primero qué acceso conservar para las empresas existentes y sus datos.
+</file>
+
+<file path="src/routes/configuracionRoutes.js">
+const express = require('express');
+const router = express.Router();
+const configuracionController = require('../controllers/configuracionController');
+const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
+
+router.use(verificarToken);
+
+// Configuración general de la empresa
+router.get('/tasas-bcv', configuracionController.obtenerTasasBcv);
+router.get('/', configuracionController.obtenerConfiguracion);
+router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
+
+// Gestión de Tiendas / Sucursales
+router.get('/tiendas', configuracionController.obtenerTiendas);
+router.post('/tiendas', autorizarRoles('OWNER'), configuracionController.crearTienda);
+
+module.exports = router;
+</file>
+
+<file path="src/app.js">
+const express = require('express');
+const cors = require('cors');
+require('dotenv').config();
+
+// Importación de Rutas de Todos los Módulos de Fligo
+const authRoutes = require('./routes/authRoutes');
+const clienteRoutes = require('./routes/clienteRoutes');
+const productoRoutes = require('./routes/productoRoutes');
+const ventaRoutes = require('./routes/ventaRoutes');
+const reporteRoutes = require('./routes/reporteRoutes');
+const leadRoutes = require('./routes/leadRoutes');
+const comunicacionRoutes = require('./routes/comunicacionRoutes');
+const configuracionRoutes = require('./routes/configuracionRoutes');
+const suscripcionRoutes = require('./routes/suscripcionRoutes');
+
+const app = express();
+
+// Middlewares Globales
+app.use(cors());
+app.use(express.json());
+
+// Endpoint de Diagnóstico y Salud de la API
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    app: 'Fligo Engine API', 
+    status: 'ONLINE', 
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date() 
+  });
+});
+
+// Registro de Rutas Mapeadas por Módulo en Fligo
+app.use('/api/auth', authRoutes);
+app.use('/api/clientes', clienteRoutes);
+app.use('/api/productos', productoRoutes);
+app.use('/api/reportes', reporteRoutes);
+app.use('/api/leads', leadRoutes);
+app.use('/api/comunicaciones', comunicacionRoutes);
+app.use('/api/configuracion', configuracionRoutes);
+app.use('/api/suscripciones', suscripcionRoutes);
+app.use('/api', ventaRoutes);
+
+// Manejo de Rutas Inexistentes (404)
+app.use((req, res) => {
+  res.status(404).json({ 
+    success: false, 
+    error: 'Ruta no encontrada en Fligo API.' 
+  });
+});
+
+// Manejo Global de Errores (500)
+app.use((err, req, res, next) => {
+  console.error('❌ [Fligo Internal Error]:', err.stack);
+  res.status(500).json({
+    success: false,
+    error: 'Error interno del servidor en Fligo API.'
+  });
+});
+
+const PORT = process.env.PORT || 10000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 [Fligo Engine] Servidor iniciado correctamente en el puerto ${PORT}`);
+});
+
+module.exports = app;
+</file>
+
 <file path="package.json">
 {
   "name": "fligo-backend",
@@ -2028,8 +1853,8 @@ CREATE INDEX idx_usuarios_tienda ON usuarios(tienda_id);
   "description": "API Backend para Fligo - CRM Multitienda SaaS",
   "main": "src/app.js",
   "scripts": {
-    "start": "node src/app.js",
-    "dev": "nodemon src/app.js"
+    "start": "node --use-system-ca src/app.js",
+    "dev": "nodemon --exec \"node --use-system-ca\" src/app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -2043,6 +1868,789 @@ CREATE INDEX idx_usuarios_tienda ON usuarios(tienda_id);
     "nodemon": "^3.1.0"
   }
 }
+</file>
+
+<file path="src/controllers/clienteController.js">
+const db = require('../config/db');
+
+// 1. Crear un nuevo cliente en Fligo
+exports.crearCliente = async (req, res) => {
+  const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
+  const tenant_id = req.user.tenant_id; // Garantiza aislamiento Multi-Tenant
+  const nombreLimpio = typeof nombre === 'string' ? nombre.trim() : '';
+  const documentoLimpio = typeof documento_identidad === 'string' ? documento_identidad.trim().toUpperCase() : '';
+  const telefonoLimpio = typeof telefono === 'string' ? telefono.trim() : '';
+  const direccionLimpia = typeof direccion === 'string' ? direccion.trim() : '';
+  
+  // Si no se especifica tienda_id, asigna la tienda del usuario conectado
+  const tiendaAsignada = tienda_id || req.user.tienda_id;
+
+  if (!documentoLimpio || !nombreLimpio || !telefonoLimpio || !direccionLimpia) {
+    return res.status(400).json({ success: false, error: 'La cédula, el nombre, el teléfono y la dirección corta del cliente son obligatorios.' });
+  }
+  if (!/^[VEJPG]?[-\s]?\d{5,12}$/i.test(documentoLimpio)) {
+    return res.status(400).json({ success: false, error: 'Ingresa una cédula de identidad válida.' });
+  }
+  if (!/^[+\d\s().-]{7,30}$/.test(telefonoLimpio)) {
+    return res.status(400).json({ success: false, error: 'Ingresa un teléfono válido para el cliente.' });
+  }
+  if (telefonoLimpio.length > 30 || direccionLimpia.length > 500 || nombreLimpio.length > 120) {
+    return res.status(400).json({ success: false, error: 'Revisa la longitud del nombre, teléfono o dirección del cliente.' });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO clientes (tenant_id, tienda_id, nombre, documento_identidad, email, telefono, direccion, categoria, notas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [tenant_id, tiendaAsignada, nombreLimpio, documentoLimpio, typeof email === 'string' && email.trim() ? email.trim() : null, telefonoLimpio, direccionLimpia, categoria || 'General', typeof notas === 'string' && notas.trim() ? notas.trim() : null]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Cliente registrado con éxito en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en crearCliente [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al registrar el cliente.' });
+  }
+};
+
+// 2. Obtener lista de clientes con filtros y paginación
+exports.obtenerClientes = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { busqueda, categoria, tienda_id, page = 1, limit = 20 } = req.query;
+
+  const offset = (page - 1) * limit;
+  let params = [tenant_id];
+  let conditions = ['c.tenant_id = $1', 'c.activo = TRUE'];
+
+  // Filtro por tienda si el usuario es un empleado con tienda asignada
+  if (req.user.rol === 'EMPLOYEE' && req.user.tienda_id) {
+    params.push(req.user.tienda_id);
+    conditions.push(`tienda_id = $${params.length}`);
+  } else if (tienda_id) {
+    params.push(tienda_id);
+    conditions.push(`tienda_id = $${params.length}`);
+  }
+
+  // Filtro por categoría
+  if (categoria) {
+    params.push(categoria);
+    conditions.push(`categoria = $${params.length}`);
+  }
+
+  // Búsqueda por Nombre, Email o Documento de Identidad
+  if (busqueda) {
+    params.push(`%${busqueda}%`);
+    const searchParameter = params.length;
+    const normalizedDocument = busqueda.toLocaleUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (normalizedDocument) {
+      params.push(`%${normalizedDocument}%`);
+      conditions.push(`(c.nombre ILIKE $${searchParameter} OR c.email ILIKE $${searchParameter} OR c.documento_identidad ILIKE $${searchParameter} OR regexp_replace(upper(c.documento_identidad), '[^A-Z0-9]', '', 'g') ILIKE $${params.length})`);
+    } else {
+      conditions.push(`(c.nombre ILIKE $${searchParameter} OR c.email ILIKE $${searchParameter} OR c.documento_identidad ILIKE $${searchParameter})`);
+    }
+  }
+
+  const whereClause = conditions.join(' AND ');
+
+  try {
+    // Consulta de los clientes
+    const clientesQuery = `
+      SELECT c.*, t.nombre as nombre_tienda 
+      FROM clientes c
+      LEFT JOIN tiendas t ON c.tienda_id = t.id
+      WHERE ${whereClause}
+      ORDER BY c.creado_en DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+    
+    // Consulta de total para la paginación
+    const totalQuery = `SELECT COUNT(*) FROM clientes c WHERE ${whereClause}`;
+
+    const [clientesRes, totalRes] = await Promise.all([
+      db.query(clientesQuery, [...params, limit, offset]),
+      db.query(totalQuery, params)
+    ]);
+
+    const total = parseInt(totalRes.rows[0].count);
+
+    res.json({
+      success: true,
+      data: clientesRes.rows,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Error en obtenerClientes [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener la lista de clientes.' });
+  }
+};
+
+// 3. Obtener detalle de un cliente por ID
+exports.obtenerClientePorId = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `SELECT c.*, t.nombre as nombre_tienda 
+       FROM clientes c
+       LEFT JOIN tiendas t ON c.tienda_id = t.id
+       WHERE c.id = $1 AND c.tenant_id = $2 AND c.activo = TRUE`,
+      [id, tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado en Fligo.' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error en obtenerClientePorId [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener los detalles del cliente.' });
+  }
+};
+
+// 4. Actualizar cliente
+exports.actualizarCliente = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+  const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
+
+  try {
+    const checkCliente = await db.query(
+      'SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2 AND activo = TRUE',
+      [id, tenant_id]
+    );
+
+    if (checkCliente.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado o sin autorización.' });
+    }
+
+    const result = await db.query(
+      `UPDATE clientes 
+       SET nombre = COALESCE($1, nombre),
+           documento_identidad = COALESCE($2, documento_identidad),
+           email = COALESCE($3, email),
+           telefono = COALESCE($4, telefono),
+           direccion = COALESCE($5, direccion),
+           categoria = COALESCE($6, categoria),
+           notas = COALESCE($7, notas),
+           tienda_id = COALESCE($8, tienda_id),
+           actualizado_en = CURRENT_TIMESTAMP
+       WHERE id = $9 AND tenant_id = $10
+       RETURNING *`,
+      [nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id, id, tenant_id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Cliente actualizado correctamente en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en actualizarCliente [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al actualizar el cliente.' });
+  }
+};
+
+// 5. Eliminar cliente (Eliminación lógica)
+exports.eliminarCliente = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `UPDATE clientes 
+       SET activo = FALSE, actualizado_en = CURRENT_TIMESTAMP 
+       WHERE id = $1 AND tenant_id = $2 
+       RETURNING id`,
+      [id, tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado o sin autorización.' });
+    }
+
+    res.json({ success: true, message: 'Cliente eliminado correctamente de Fligo.' });
+  } catch (error) {
+    console.error('Error en eliminarCliente [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al eliminar el cliente.' });
+  }
+};
+</file>
+
+<file path="src/controllers/configuracionController.js">
+const db = require('../config/db');
+const https = require('https');
+const tls = require('tls');
+const fs = require('fs');
+const path = require('path');
+
+const bcvCertificateAuthority = fs.readFileSync(
+  path.join(__dirname, '../certs/sectigo-public-server-authentication-ca-dv-r36.pem')
+);
+
+let tasaBcvCache = null;
+let tasaBcvFetchedAt = 0;
+const BCV_CACHE_DURATION_MS = 60 * 60 * 1000;
+
+function parseTasaBcv(html, id) {
+  const block = html.match(new RegExp(`<div\\b[^>]*\\bid=["']${id}["'][^>]*>([\\s\\S]*?)<\\/div>\\s*<\\/div>\\s*<\\/div>`, 'i'));
+  const value = block?.[1].match(/<strong\b[^>]*>([\s\S]*?)<\/strong>/i)?.[1]
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .trim();
+  if (!value) throw new Error(`El BCV no publicó la tasa ${id === 'dolar' ? 'USD' : 'EUR'}.`);
+  const rate = Number(value.replace(/\./g, '').replace(',', '.'));
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error(`La tasa ${id} publicada por el BCV no es válida.`);
+  return rate;
+}
+
+function downloadPaginaBcv() {
+  return new Promise((resolve, reject) => {
+    const request = https.get('https://www.bcv.org.ve/', {
+      headers: { 'User-Agent': 'Fligo CRM/1.0 (consulta de tipo de cambio)', Accept: 'text/html' },
+      ca: [...tls.rootCertificates, bcvCertificateAuthority]
+    }, response => {
+      if (response.statusCode !== 200) {
+        response.resume();
+        reject(new Error(`El BCV respondió HTTP ${response.statusCode}.`));
+        return;
+      }
+      let html = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => {
+        html += chunk;
+        if (html.length > 5_000_000) request.destroy(new Error('La página del BCV superó el tamaño permitido.'));
+      });
+      response.on('end', () => resolve(html));
+      response.on('error', reject);
+    });
+    request.setTimeout(8000, () => request.destroy(new Error('La consulta al BCV excedió el tiempo límite.')));
+    request.on('error', reject);
+  });
+}
+
+async function obtenerDatosTasasBcv() {
+  if (tasaBcvCache && Date.now() - tasaBcvFetchedAt < BCV_CACHE_DURATION_MS) {
+    return tasaBcvCache;
+  }
+  const html = await downloadPaginaBcv();
+  const fechaValor = html.match(/Fecha\s+Valor:\s*(?:<[^>]*>\s*)*([^<]+)/i)?.[1]
+    ?.replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const tasas = {
+    usd_ves: parseTasaBcv(html, 'dolar'),
+    eur_ves: parseTasaBcv(html, 'euro'),
+    fecha_valor: fechaValor || null,
+    actualizado_en: new Date().toISOString(),
+    fuente: 'Banco Central de Venezuela'
+  };
+  tasaBcvCache = tasas;
+  tasaBcvFetchedAt = Date.now();
+  return tasas;
+}
+
+exports.obtenerDatosTasasBcv = obtenerDatosTasasBcv;
+
+exports.obtenerTasasBcv = async (req, res) => {
+  try {
+    return res.json({ success: true, data: await obtenerDatosTasasBcv() });
+  } catch (error) {
+    console.error('Error en obtenerTasasBcv [BCV]:', error);
+    return res.status(502).json({
+      success: false,
+      error: 'No fue posible consultar la tasa de referencia del BCV.'
+    });
+  }
+};
+
+exports.parseTasasBcv = html => ({
+  usd_ves: parseTasaBcv(html, 'dolar'),
+  eur_ves: parseTasaBcv(html, 'euro'),
+  fecha_valor: html.match(/Fecha\s+Valor:\s*(?:<[^>]*>\s*)*([^<]+)/i)?.[1]?.replace(/\s+/g, ' ').trim() || null
+});
+
+// 1. Obtener o crear configuración global de la empresa
+exports.obtenerConfiguracion = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    let result = await db.query(
+      `SELECT c.*, t.nombre_empresa, t.plan 
+       FROM configuracion_empresa c
+       RIGHT JOIN tenants t ON c.tenant_id = t.id
+       WHERE t.id = $1`,
+      [tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Empresa no encontrada.' });
+    }
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error('Error en obtenerConfiguracion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener la configuración de la empresa.' });
+  }
+};
+
+// 2. Actualizar configuración de la empresa (Moneda, Tasa, Impuestos)
+exports.actualizarConfiguracion = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal } = req.body;
+
+  try {
+    const result = await db.query(
+      `INSERT INTO configuracion_empresa (tenant_id, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (tenant_id) DO UPDATE SET
+         logo_url = COALESCE(EXCLUDED.logo_url, configuracion_empresa.logo_url),
+         moneda_principal = COALESCE(EXCLUDED.moneda_principal, configuracion_empresa.moneda_principal),
+         simbolo_moneda = COALESCE(EXCLUDED.simbolo_moneda, configuracion_empresa.simbolo_moneda),
+         impuesto_defecto = COALESCE(EXCLUDED.impuesto_defecto, configuracion_empresa.impuesto_defecto),
+         tasa_cambio = COALESCE(EXCLUDED.tasa_cambio, configuracion_empresa.tasa_cambio),
+         direccion_fiscal = COALESCE(EXCLUDED.direccion_fiscal, configuracion_empresa.direccion_fiscal),
+         documento_fiscal = COALESCE(EXCLUDED.documento_fiscal, configuracion_empresa.documento_fiscal),
+         actualizado_en = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [tenant_id, logo_url || null, moneda_principal || 'USD', simbolo_moneda || '$', impuesto_defecto || 16.00, tasa_cambio || 1.0000, direccion_fiscal || null, documento_fiscal || null]
+    );
+
+    res.json({
+      success: true,
+      message: 'Configuración de la empresa actualizada con éxito en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en actualizarConfiguracion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al guardar la configuración.' });
+  }
+};
+
+// 3. Crear nueva Sucursal / Tienda en la Empresa
+exports.crearTienda = async (req, res) => {
+  const { nombre, direccion, telefono } = req.body;
+  const tenant_id = req.user.tenant_id;
+
+  if (!nombre) {
+    return res.status(400).json({ success: false, error: 'El nombre de la tienda es obligatorio.' });
+  }
+
+  try {
+    const result = await db.query(
+      `INSERT INTO tiendas (tenant_id, nombre, direccion, telefono)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [tenant_id, nombre, direccion || null, telefono || null]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Nueva tienda registrada en Fligo.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en crearTienda [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al crear la tienda.' });
+  }
+};
+
+// 4. Listar todas las tiendas de la empresa
+exports.obtenerTiendas = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `SELECT * FROM tiendas WHERE tenant_id = $1 AND activa = TRUE ORDER BY creado_en ASC`,
+      [tenant_id]
+    );
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('Error en obtenerTiendas [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al obtener la lista de tiendas.' });
+  }
+};
+</file>
+
+<file path="src/controllers/ventaController.js">
+const db = require('../config/db');
+const { obtenerDatosTasasBcv } = require('./configuracionController');
+
+// 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
+exports.registrarVenta = async (req, res) => {
+  const { cliente_id, productos, metodo_pago, pagos, vuelto, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const targetTiendaId = tienda_id || req.user.tienda_id;
+  const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA']);
+  let pagosValidados = null;
+  let tasaPago = null;
+  let igtfUsd = 0;
+  let vueltoValidado = null;
+
+  if (vuelto !== undefined) {
+    const legacyChange = vuelto && ['VES', 'USD'].includes(vuelto.moneda);
+    const usd = Number(legacyChange ? (vuelto.moneda === 'USD' ? vuelto.monto : 0) : vuelto && vuelto.usd !== undefined ? vuelto.usd : 0);
+    const ves = Number(legacyChange ? (vuelto.moneda === 'VES' ? vuelto.monto : 0) : vuelto && vuelto.ves !== undefined ? vuelto.ves : 0);
+    if (!vuelto || !Number.isFinite(usd) || usd < 0 || !Number.isFinite(ves) || ves < 0) {
+      return res.status(400).json({ success: false, error: 'El vuelto en dólares y bolívares debe tener montos válidos no negativos.' });
+    }
+    vueltoValidado = { usd, ves };
+  }
+
+  if (pagos !== undefined) {
+    if (!Array.isArray(pagos) || pagos.length === 0 || pagos.some(pago =>
+      !pago || !metodosPermitidos.has(pago.metodo_pago) || !Number.isFinite(Number(pago.monto)) || Number(pago.monto) <= 0
+      || (pago.moneda !== undefined && !['VES', 'USD', 'EUR'].includes(pago.moneda))
+      || (pago.metodo_pago === 'DIVISA' && pago.moneda === 'VES')
+      || (pago.metodo_pago !== 'DIVISA' && pago.moneda !== undefined && pago.moneda !== 'VES')
+    )) {
+      return res.status(400).json({ success: false, error: 'Debes indicar al menos un método de pago válido y su monto.' });
+    }
+    try {
+      tasaPago = await obtenerDatosTasasBcv();
+    } catch (error) {
+      console.error('Error en registrarVenta [BCV]:', error);
+      return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para convertir el pago y calcular el IGTF.' });
+    }
+    pagosValidados = pagos.map(pago => {
+      const legacyUsdAmount = pago.moneda === undefined;
+      const moneda = legacyUsdAmount ? 'USD' : pago.moneda;
+      const monto = Number(pago.monto);
+      const tasaMoneda = moneda === 'EUR' ? tasaPago.eur_ves : tasaPago.usd_ves;
+      const montoBsCentimos = legacyUsdAmount
+        ? Math.round(monto * tasaPago.usd_ves * 100)
+        : moneda === 'VES'
+          ? Math.round(monto * 100)
+          : Math.round(monto * tasaMoneda * 100);
+      const montoUsdCentimos = Math.round(montoBsCentimos / tasaPago.usd_ves);
+      return {
+        metodo_pago: pago.metodo_pago,
+        moneda,
+        monto,
+        monto_usd: montoUsdCentimos / 100,
+        monto_usd_centimos: montoUsdCentimos,
+        monto_bs_centimos: montoBsCentimos,
+        igtf_bs_centimos: 0
+      };
+    });
+  }
+
+  if (!productos || !Array.isArray(productos) || productos.length === 0) {
+    return res.status(400).json({ success: false, error: 'La venta debe contener al menos un producto.' });
+  }
+
+  if (!metodo_pago && !pagosValidados) {
+    return res.status(400).json({ success: false, error: 'Debes especificar el método de pago.' });
+  }
+
+  if (!targetTiendaId) {
+    return res.status(400).json({ success: false, error: 'Debes especificar la tienda donde se realiza la venta.' });
+  }
+
+  const client = await db.pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    let subtotalCalculado = 0;
+    const itemsProcesados = [];
+
+    // Validar productos y verificar stock disponible en la tienda
+    for (const item of productos) {
+      const prodRes = await client.query(
+        `SELECT p.id, p.precio_base, COALESCE(i.stock_actual, 0) as stock_actual
+         FROM productos p
+         LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $1
+         WHERE p.id = $2 AND p.tenant_id = $3 AND p.activo = TRUE
+         FOR UPDATE OF p`,
+        [targetTiendaId, item.producto_id, tenant_id]
+      );
+
+      if (prodRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: `Producto ID ${item.producto_id} no encontrado en la empresa.` });
+      }
+
+      const prod = prodRes.rows[0];
+
+      if (prod.stock_actual < item.cantidad) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          success: false, 
+          error: `Stock insuficiente para el producto ID ${item.producto_id}. Disponible: ${prod.stock_actual}, Solicitado: ${item.cantidad}` 
+        });
+      }
+
+      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
+      const subtotalItem = precioUnitario * item.cantidad;
+      subtotalCalculado += subtotalItem;
+
+      itemsProcesados.push({
+        producto_id: prod.id,
+        cantidad: item.cantidad,
+        precio_unitario: precioUnitario,
+        subtotal: subtotalItem,
+        stock_actual: prod.stock_actual
+      });
+    }
+
+    const impuestoBase = Number(impuesto);
+    const descuentoVenta = Number(descuento);
+    if (!Number.isFinite(impuestoBase) || impuestoBase < 0 || !Number.isFinite(descuentoVenta) || descuentoVenta < 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'El impuesto y el descuento deben ser montos válidos no negativos.' });
+    }
+    if (pagosValidados) {
+      let baseDivisaRestante = Math.max(0, Math.round((subtotalCalculado + impuestoBase - descuentoVenta) * tasaPago.usd_ves * 100));
+      let igtfUsdCentimos = 0;
+      pagosValidados.forEach(pago => {
+        if (pago.metodo_pago !== 'DIVISA') return;
+        const baseIgtfCentimos = Math.min(pago.monto_bs_centimos, baseDivisaRestante);
+        baseDivisaRestante -= baseIgtfCentimos;
+        pago.igtf_bs_centimos = Math.round(baseIgtfCentimos * 0.03);
+        igtfUsdCentimos += Math.round(pago.igtf_bs_centimos / tasaPago.usd_ves);
+      });
+      igtfUsd = igtfUsdCentimos / 100;
+    }
+    const totalCalculado = subtotalCalculado + impuestoBase + igtfUsd - descuentoVenta;
+    if (pagosValidados) {
+      const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + pago.monto_usd_centimos, 0);
+      const vueltoBsCentimos = vueltoValidado
+        ? Math.round(vueltoValidado.usd * tasaPago.usd_ves * 100) + Math.round(vueltoValidado.ves * 100)
+        : 0;
+      const vueltoUsdCentimos = Math.round(vueltoBsCentimos / tasaPago.usd_ves);
+      if (vueltoUsdCentimos > montoPagadoCentavos || Math.abs(montoPagadoCentavos - vueltoUsdCentimos - Math.round(totalCalculado * 100)) > 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, error: 'Los montos recibidos menos el vuelto deben cubrir exactamente el total de la venta y el IGTF.' });
+      }
+    }
+    const metodoPagoVenta = pagosValidados
+      ? pagosValidados.length === 1
+        ? pagosValidados[0].metodo_pago === 'DIVISA' ? `DIVISA ${pagosValidados[0].moneda}` : pagosValidados[0].metodo_pago
+        : 'MIXTO'
+      : metodo_pago;
+    const notasVenta = pagosValidados
+      ? [
+        notas,
+        `Pagos: ${pagosValidados.map(pago => `${pago.metodo_pago}${pago.metodo_pago === 'DIVISA' ? ` ${pago.moneda}` : ''} ${pago.monto.toFixed(2)} ${pago.moneda}`).join('; ')}.`,
+        igtfUsd > 0 ? `IGTF 3% sobre la porción de la factura aplicada en divisa: Bs. ${(pagosValidados.reduce((total, pago) => total + pago.igtf_bs_centimos, 0) / 100).toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null,
+        vueltoValidado && (vueltoValidado.usd > 0 || vueltoValidado.ves > 0)
+          ? `Vuelto entregado: USD ${vueltoValidado.usd.toFixed(2)} + Bs. ${vueltoValidado.ves.toFixed(2)}.`
+          : null
+      ].filter(Boolean).join('\n')
+      : notas || null;
+
+    // Insertar Cabecera de Venta
+    const ventaRes = await client.query(
+      `INSERT INTO ventas (tenant_id, tienda_id, cliente_id, usuario_id, cotizacion_id, metodo_pago, subtotal, impuesto, descuento, total, notas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodoPagoVenta, subtotalCalculado, impuestoBase + igtfUsd, descuentoVenta, totalCalculado, notasVenta]
+    );
+
+    const nuevaVenta = ventaRes.rows[0];
+
+    // Insertar Detalle y Descontar Inventario
+    for (const item of itemsProcesados) {
+      await client.query(
+        `INSERT INTO detalle_venta (venta_id, producto_id, cantidad, precio_unitario, subtotal)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [nuevaVenta.id, item.producto_id, item.cantidad, item.precio_unitario, item.subtotal]
+      );
+
+      const nuevoStock = item.stock_actual - item.cantidad;
+
+      // Actualizar Stock de la Tienda
+      await client.query(
+        `UPDATE inventario_tienda
+         SET stock_actual = $1, actualizado_en = CURRENT_TIMESTAMP
+         WHERE tenant_id = $2 AND tienda_id = $3 AND producto_id = $4`,
+        [nuevoStock, tenant_id, targetTiendaId, item.producto_id]
+      );
+
+      // Registrar movimiento de auditoría
+      await client.query(
+        `INSERT INTO movimientos_inventario (tenant_id, tienda_id, producto_id, usuario_id, tipo_movimiento, cantidad, stock_resultante, motivo)
+         VALUES ($1, $2, $3, $4, 'VENTA', $5, $6, $7)`,
+        [tenant_id, targetTiendaId, item.producto_id, req.user.user_id, item.cantidad, nuevoStock, `Venta registrada ID: ${nuevaVenta.id}`]
+      );
+    }
+
+    // Si provenía de una cotización, marcarla como CONVERTIDA
+    if (cotizacion_id) {
+      await client.query(
+        `UPDATE cotizaciones SET estado = 'CONVERTIDA' WHERE id = $1 AND tenant_id = $2`,
+        [cotizacion_id, tenant_id]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      success: true,
+      message: 'Venta registrada con éxito en Fligo.',
+      data: nuevaVenta
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en registrarVenta [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al procesar la venta.' });
+  } finally {
+    client.release();
+  }
+};
+
+// 2. Crear Cotización / Presupuesto
+exports.crearCotizacion = async (req, res) => {
+  const { cliente_id, productos, descuento = 0, impuesto = 0, notas, tienda_id } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const targetTiendaId = tienda_id || req.user.tienda_id;
+
+  if (!productos || !Array.isArray(productos) || productos.length === 0) {
+    return res.status(400).json({ success: false, error: 'La cotización debe incluir al menos un producto.' });
+  }
+
+  const client = await db.pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    let subtotalCalculado = 0;
+    const itemsProcesados = [];
+
+    for (const item of productos) {
+      const prodRes = await client.query(
+        `SELECT id, precio_base FROM productos WHERE id = $1 AND tenant_id = $2 AND activo = TRUE`,
+        [item.producto_id, tenant_id]
+      );
+
+      if (prodRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: `Producto ID ${item.producto_id} no encontrado.` });
+      }
+
+      const prod = prodRes.rows[0];
+      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
+      const subtotalItem = precioUnitario * item.cantidad;
+      subtotalCalculado += subtotalItem;
+
+      itemsProcesados.push({
+        producto_id: prod.id,
+        cantidad: item.cantidad,
+        precio_unitario: precioUnitario,
+        subtotal: subtotalItem
+      });
+    }
+
+    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+
+    const cotRes = await client.query(
+      `INSERT INTO cotizaciones (tenant_id, tienda_id, cliente_id, usuario_id, subtotal, impuesto, descuento, total, notas)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
+    );
+
+    const nuevaCotizacion = cotRes.rows[0];
+
+    for (const item of itemsProcesados) {
+      await client.query(
+        `INSERT INTO detalle_cotizacion (cotizacion_id, producto_id, cantidad, precio_unitario, subtotal)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [nuevaCotizacion.id, item.producto_id, item.cantidad, item.precio_unitario, item.subtotal]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      success: true,
+      message: 'Cotización creada exitosamente en Fligo.',
+      data: nuevaCotizacion
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en crearCotizacion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al generar la cotización.' });
+  } finally {
+    client.release();
+  }
+};
+
+// 3. Listar Ventas por Tienda con Filtros
+exports.obtenerVentas = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { tienda_id, fecha_inicio, fecha_fin, page = 1, limit = 20 } = req.query;
+
+  const targetTiendaId = (req.user.rol === 'EMPLOYEE' && req.user.tienda_id)
+    ? req.user.tienda_id
+    : (tienda_id || req.user.tienda_id);
+
+  const offset = (page - 1) * limit;
+  let params = [tenant_id];
+  let conditions = ['v.tenant_id = $1'];
+
+  if (targetTiendaId) {
+    params.push(targetTiendaId);
+    conditions.push(`v.tienda_id = $${params.length}`);
+  }
+
+  if (fecha_inicio) {
+    params.push(fecha_inicio);
+    conditions.push(`v.creado_en >= $${params.length}`);
+  }
+
+  if (fecha_fin) {
+    params.push(fecha_fin);
+    conditions.push(`v.creado_en <= $${params.length}`);
+  }
+
+  const whereClause = conditions.join(' AND ');
+
+  try {
+    const query = `
+      SELECT v.*, 
+             c.nombre as nombre_cliente, 
+             u.nombre as nombre_vendedor,
+             t.nombre as nombre_tienda
+      FROM ventas v
+      LEFT JOIN clientes c ON v.cliente_id = c.id
+      LEFT JOIN usuarios u ON v.usuario_id = u.id
+      LEFT JOIN tiendas t ON v.tienda_id = t.id
+      WHERE ${whereClause}
+      ORDER BY v.creado_en DESC
+      LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+    `;
+
+    const result = await db.query(query, [...params, limit, offset]);
+
+    res.json({
+      success: true,
+      data: result.rows,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+
+  } catch (error) {
+    console.error('Error en obtenerVentas [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al consultar el historial de ventas.' });
+  }
+};
 </file>
 
 </files>

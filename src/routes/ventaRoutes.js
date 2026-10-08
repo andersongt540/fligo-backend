@@ -10,6 +10,8 @@ router.post('/ventas', ventaController.registrarVenta);
 router.get('/ventas', ventaController.obtenerVentas);
 
 // Cotizaciones / Presupuestos
+router.get('/cotizaciones', ventaController.obtenerCotizaciones);
 router.post('/cotizaciones', ventaController.crearCotizacion);
+router.put('/cotizaciones/:id/estado', ventaController.actualizarEstadoCotizacion);
 
 module.exports = router;

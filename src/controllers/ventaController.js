@@ -231,15 +231,46 @@ exports.crearCotizacion = async (req, res) => {
   const { cliente_id, productos, descuento = 0, impuesto = 0, notas, tienda_id } = req.body;
   const tenant_id = req.user.tenant_id;
   const targetTiendaId = tienda_id || req.user.tienda_id;
+  const descuentoValidado = Number(descuento);
+  const impuestoValidado = Number(impuesto);
 
   if (!productos || !Array.isArray(productos) || productos.length === 0) {
     return res.status(400).json({ success: false, error: 'La cotización debe incluir al menos un producto.' });
+  }
+  if (!targetTiendaId) {
+    return res.status(400).json({ success: false, error: 'Debes especificar la tienda donde se crea el presupuesto.' });
+  }
+  if (!Number.isFinite(descuentoValidado) || descuentoValidado < 0 || !Number.isFinite(impuestoValidado) || impuestoValidado < 0) {
+    return res.status(400).json({ success: false, error: 'El impuesto y el descuento deben ser montos válidos no negativos.' });
+  }
+  if (productos.some(item => !item || !item.producto_id || !Number.isInteger(Number(item.cantidad)) || Number(item.cantidad) <= 0)) {
+    return res.status(400).json({ success: false, error: 'Cada producto debe tener un identificador y una cantidad entera mayor que cero.' });
   }
 
   const client = await db.pool.connect();
 
   try {
     await client.query('BEGIN');
+
+    const tiendaRes = await client.query(
+      'SELECT id FROM tiendas WHERE id = $1 AND tenant_id = $2 AND activa = TRUE',
+      [targetTiendaId, tenant_id]
+    );
+    if (tiendaRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa o está inactiva.' });
+    }
+
+    if (cliente_id) {
+      const clienteRes = await client.query(
+        'SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2 AND activo = TRUE',
+        [cliente_id, tenant_id]
+      );
+      if (clienteRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: 'El cliente seleccionado no existe o no pertenece a la empresa.' });
+      }
+    }
 
     let subtotalCalculado = 0;
     const itemsProcesados = [];
@@ -256,25 +287,34 @@ exports.crearCotizacion = async (req, res) => {
       }
 
       const prod = prodRes.rows[0];
-      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
-      const subtotalItem = precioUnitario * item.cantidad;
+      const precioUnitario = item.precio_unitario !== undefined ? Number(item.precio_unitario) : Number(prod.precio_base);
+      const cantidad = Number(item.cantidad);
+      if (!Number.isFinite(precioUnitario) || precioUnitario < 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ success: false, error: 'El precio unitario de cada producto debe ser un monto válido no negativo.' });
+      }
+      const subtotalItem = precioUnitario * cantidad;
       subtotalCalculado += subtotalItem;
 
       itemsProcesados.push({
         producto_id: prod.id,
-        cantidad: item.cantidad,
+        cantidad,
         precio_unitario: precioUnitario,
         subtotal: subtotalItem
       });
     }
 
-    const totalCalculado = subtotalCalculado + parseFloat(impuesto) - parseFloat(descuento);
+    const totalCalculado = subtotalCalculado + impuestoValidado - descuentoValidado;
+    if (!Number.isFinite(totalCalculado) || totalCalculado <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'El total del presupuesto debe ser mayor que cero.' });
+    }
 
     const cotRes = await client.query(
       `INSERT INTO cotizaciones (tenant_id, tienda_id, cliente_id, usuario_id, subtotal, impuesto, descuento, total, notas)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, subtotalCalculado, impuesto, descuento, totalCalculado, notas || null]
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, subtotalCalculado, impuestoValidado, descuentoValidado, totalCalculado, typeof notas === 'string' && notas.trim() ? notas.trim() : null]
     );
 
     const nuevaCotizacion = cotRes.rows[0];
@@ -301,6 +341,101 @@ exports.crearCotizacion = async (req, res) => {
     res.status(500).json({ success: false, error: 'Error al generar la cotización.' });
   } finally {
     client.release();
+  }
+};
+
+// 3. Consultar presupuestos creados en la empresa
+exports.obtenerCotizaciones = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const pageValue = Number.parseInt(req.query.page, 10);
+  const limitValue = Number.parseInt(req.query.limit, 10);
+  const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const limit = Number.isInteger(limitValue) && limitValue > 0 ? Math.min(limitValue, 100) : 100;
+  const offset = (page - 1) * limit;
+  const params = [tenant_id];
+  const conditions = ['c.tenant_id = $1'];
+
+  if (req.user.rol === 'EMPLOYEE') {
+    params.push(req.user.user_id);
+    conditions.push(`c.usuario_id = $${params.length}`);
+  } else if (req.query.tienda_id) {
+    params.push(req.query.tienda_id);
+    conditions.push(`c.tienda_id = $${params.length}`);
+  } else if (req.user.tienda_id) {
+    params.push(req.user.tienda_id);
+    conditions.push(`c.tienda_id = $${params.length}`);
+  }
+
+  try {
+    const result = await db.query(
+      `SELECT c.*, cl.nombre AS nombre_cliente, u.nombre AS nombre_vendedor, t.nombre AS nombre_tienda,
+              COALESCE(d.productos, '[]'::json) AS productos
+       FROM cotizaciones c
+       LEFT JOIN clientes cl ON c.cliente_id = cl.id
+       LEFT JOIN usuarios u ON c.usuario_id = u.id
+       LEFT JOIN tiendas t ON c.tienda_id = t.id
+       LEFT JOIN LATERAL (
+         SELECT json_agg(json_build_object(
+           'producto_id', dc.producto_id,
+           'nombre_producto', p.nombre,
+           'cantidad', dc.cantidad,
+           'precio_unitario', dc.precio_unitario,
+           'subtotal', dc.subtotal
+         ) ORDER BY dc.id) AS productos
+         FROM detalle_cotizacion dc
+         LEFT JOIN productos p ON dc.producto_id = p.id
+         WHERE dc.cotizacion_id = c.id
+       ) d ON TRUE
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY c.creado_en DESC
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, limit, offset]
+    );
+
+    res.json({ success: true, data: result.rows, page, limit });
+  } catch (error) {
+    console.error('Error en obtenerCotizaciones [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al consultar los presupuestos.' });
+  }
+};
+
+// 4. Actualizar el seguimiento de un presupuesto
+exports.actualizarEstadoCotizacion = async (req, res) => {
+  const { id } = req.params;
+  const { estado } = req.body;
+  const estadosPermitidos = new Set(['PENDIENTE', 'APROBADA', 'RECHAZADA']);
+
+  if (!estadosPermitidos.has(estado)) {
+    return res.status(400).json({ success: false, error: 'El estado del presupuesto no es válido.' });
+  }
+
+  const params = [estado, id, req.user.tenant_id];
+  let scope = '';
+  if (req.user.rol === 'EMPLOYEE') {
+    params.push(req.user.user_id);
+    scope = ` AND usuario_id = $${params.length}`;
+  } else if (req.user.tienda_id) {
+    params.push(req.user.tienda_id);
+    scope = ` AND tienda_id = $${params.length}`;
+  }
+
+  try {
+    const result = await db.query(
+      `UPDATE cotizaciones
+       SET estado = $1
+       WHERE id = $2 AND tenant_id = $3 AND estado <> 'CONVERTIDA'${scope}
+       RETURNING *`,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Presupuesto no encontrado, convertido o sin permisos.' });
+    }
+
+    res.json({ success: true, message: 'Estado del presupuesto actualizado.', data: result.rows[0] });
+  } catch (error) {
+    console.error('Error en actualizarEstadoCotizacion [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al actualizar el estado del presupuesto.' });
   }
 };
 
