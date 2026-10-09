@@ -210,7 +210,7 @@ exports.listarEmpresasPlataforma = async (req, res) => {
                   'sucursal', ti.nombre
                 ) ORDER BY u.creado_en)
                 FROM usuarios u
-                LEFT JOIN tiendas ti ON ti.id = u.tienda_id
+                LEFT JOIN tiendas ti ON ti.id = u.tienda_id AND ti.tenant_id = u.tenant_id
                 WHERE u.tenant_id = t.id
               ), '[]'::json) AS cuentas,
               COALESCE((

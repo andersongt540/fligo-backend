@@ -19,6 +19,13 @@ Por esta decisión el backend no crea identidades en Firebase Admin. El usuario 
 5. En Firebase Authentication, autoriza los dominios reales de Hosting y cualquier dominio local utilizado para desarrollo (por ejemplo, `localhost` o `127.0.0.1`).
 6. Prueba registro con correo, el enlace de verificación, Google, restablecimiento de contraseña, una cuenta anterior y una cuenta de empleado.
 
+## Configuración de seguridad del backend
+
+- Configura `CORS_ORIGINS` en Render como una lista separada por comas de los orígenes exactos que sirven el frontend, por ejemplo `https://fliigo.web.app,https://fliigo.app`. No incluyas comodines ni localhost en producción.
+- En producción son obligatorios `DATABASE_URL` y `JWT_SECRET`. Conserva `PGSSL_REJECT_UNAUTHORIZED` sin definir o en `true` para validar certificados PostgreSQL; no lo desactives en producción.
+- Los intentos de crear sesión y migrar cuentas están limitados por IP. El almacenamiento del límite es local al proceso; si Render ejecuta varias instancias, configura un almacén compartido para que el límite sea común a todas.
+- `.env` y `node_modules` están excluidos de Git. `.env` estuvo versionado anteriormente: si el repositorio se publicó o compartió, rota las credenciales que pudo contener. Quitar el archivo del siguiente commit no borra valores del historial anterior.
+
 Los endpoints `/api/auth/login` y `/api/auth/register-tenant` ya no se utilizan ni están publicados: el acceso se realiza mediante `/api/auth/firebase-session`, que rechaza tokens sin correo verificado.
 
 ## Cuentas existentes

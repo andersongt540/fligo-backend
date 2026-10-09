@@ -51,7 +51,7 @@ exports.obtenerDashboardSummary = async (req, res) => {
         SUM(dv.subtotal) as total_recaudado
       FROM detalle_venta dv
       JOIN ventas v ON dv.venta_id = v.id
-      JOIN productos p ON dv.producto_id = p.id
+      JOIN productos p ON dv.producto_id = p.id AND p.tenant_id = v.tenant_id
       WHERE ${whereClause}
       GROUP BY p.id, p.nombre, p.codigo_sku
       ORDER BY total_unidades_vendidas DESC
@@ -118,7 +118,7 @@ exports.obtenerVentasPorTienda = async (req, res) => {
         COALESCE(SUM(v.total), 0) as total_ventas,
         COALESCE(COUNT(v.id), 0) as cantidad_ventas
       FROM tiendas t
-      LEFT JOIN ventas v ON t.id = v.tienda_id AND ${fechaWhere}
+      LEFT JOIN ventas v ON t.id = v.tienda_id AND v.tenant_id = t.tenant_id AND ${fechaWhere}
       WHERE ${conditions.join(' AND ')}
       GROUP BY t.id, t.nombre
       ORDER BY total_ventas DESC
@@ -169,8 +169,8 @@ exports.obtenerRankingVendedores = async (req, res) => {
         COALESCE(SUM(v.total), 0) as total_vendido,
         COALESCE(COUNT(v.id), 0) as cantidad_ventas
       FROM usuarios u
-      JOIN ventas v ON u.id = v.usuario_id
-      LEFT JOIN tiendas t ON v.tienda_id = t.id
+      JOIN ventas v ON u.id = v.usuario_id AND u.tenant_id = v.tenant_id
+      LEFT JOIN tiendas t ON v.tienda_id = t.id AND t.tenant_id = v.tenant_id
       WHERE ${conditions.join(' AND ')}
       GROUP BY u.id, u.nombre, t.nombre
       ORDER BY total_vendido DESC

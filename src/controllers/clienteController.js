@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { activeStore, employeeClient } = require('../utils/tenantValidation');
 
 // 1. Crear un nuevo cliente en Fligo
 exports.crearCliente = async (req, res) => {
@@ -26,6 +27,10 @@ exports.crearCliente = async (req, res) => {
   }
 
   try {
+    if ((tiendaAsignada && !(await activeStore(db, tenant_id, tiendaAsignada)))
+      || (req.user.rol === 'EMPLOYEE' && tiendaAsignada !== req.user.tienda_id)) {
+      return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa o no está asignada a este usuario.' });
+    }
     const result = await db.query(
       `INSERT INTO clientes (tenant_id, tienda_id, nombre, documento_identidad, email, telefono, direccion, categoria, notas)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -88,7 +93,7 @@ exports.obtenerClientes = async (req, res) => {
     const clientesQuery = `
       SELECT c.*, t.nombre as nombre_tienda 
       FROM clientes c
-      LEFT JOIN tiendas t ON c.tienda_id = t.id
+      LEFT JOIN tiendas t ON c.tienda_id = t.id AND t.tenant_id = c.tenant_id
       WHERE ${whereClause}
       ORDER BY c.creado_en DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
@@ -129,9 +134,10 @@ exports.obtenerClientePorId = async (req, res) => {
     const result = await db.query(
       `SELECT c.*, t.nombre as nombre_tienda 
        FROM clientes c
-       LEFT JOIN tiendas t ON c.tienda_id = t.id
-       WHERE c.id = $1 AND c.tenant_id = $2 AND c.activo = TRUE`,
-      [id, tenant_id]
+      LEFT JOIN tiendas t ON c.tienda_id = t.id AND t.tenant_id = c.tenant_id
+       WHERE c.id = $1 AND c.tenant_id = $2 AND c.activo = TRUE
+         AND ($3::boolean = FALSE OR c.tienda_id = $4)`,
+      [id, tenant_id, req.user.rol === 'EMPLOYEE', req.user.tienda_id]
     );
 
     if (result.rows.length === 0) {
@@ -152,9 +158,17 @@ exports.actualizarCliente = async (req, res) => {
   const { nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id } = req.body;
 
   try {
+    if (req.user.rol === 'EMPLOYEE' && !(await employeeClient(db, tenant_id, id, req.user.tienda_id))) {
+      return res.status(404).json({ success: false, error: 'Cliente no encontrado o sin autorización.' });
+    }
+    if (tienda_id && (!(await activeStore(db, tenant_id, tienda_id))
+      || (req.user.rol === 'EMPLOYEE' && tienda_id !== req.user.tienda_id))) {
+      return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa o no está asignada a este usuario.' });
+    }
     const checkCliente = await db.query(
-      'SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2 AND activo = TRUE',
-      [id, tenant_id]
+      `SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2 AND activo = TRUE
+       AND ($3::boolean = FALSE OR tienda_id = $4)`,
+      [id, tenant_id, req.user.rol === 'EMPLOYEE', req.user.tienda_id]
     );
 
     if (checkCliente.rows.length === 0) {
@@ -172,9 +186,9 @@ exports.actualizarCliente = async (req, res) => {
            notas = COALESCE($7, notas),
            tienda_id = COALESCE($8, tienda_id),
            actualizado_en = CURRENT_TIMESTAMP
-       WHERE id = $9 AND tenant_id = $10
+      WHERE id = $9 AND tenant_id = $10 AND ($11::boolean = FALSE OR tienda_id = $12)
        RETURNING *`,
-      [nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id, id, tenant_id]
+          [nombre, documento_identidad, email, telefono, direccion, categoria, notas, tienda_id, id, tenant_id, req.user.rol === 'EMPLOYEE', req.user.tienda_id]
     );
 
     res.json({

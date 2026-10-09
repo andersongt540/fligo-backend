@@ -1,11 +1,13 @@
 const db = require('../config/db');
+const { activeClient, activeLead, employeeClient, employeeLead } = require('../utils/tenantValidation');
 
 // 1. Registrar una interacción/comunicación en la bitácora
 exports.registrarInteraccion = async (req, res) => {
   const { cliente_id, lead_id, canal, mensaje, metadata } = req.body;
   const tenant_id = req.user.tenant_id;
 
-  if (!canal || !mensaje) {
+  const canalesPermitidos = new Set(['WHATSAPP', 'EMAIL', 'LLAMADA', 'NOTA_INTERNA']);
+  if (!canalesPermitidos.has(canal) || typeof mensaje !== 'string' || !mensaje.trim() || mensaje.length > 10000) {
     return res.status(400).json({ success: false, error: 'El canal y el mensaje son obligatorios.' });
   }
 
@@ -14,11 +16,18 @@ exports.registrarInteraccion = async (req, res) => {
   }
 
   try {
+    if ((cliente_id && !(await activeClient(db, tenant_id, cliente_id)))
+      || (lead_id && !(await activeLead(db, tenant_id, lead_id)))
+      || (req.user.rol === 'EMPLOYEE' && cliente_id && !(await employeeClient(db, tenant_id, cliente_id, req.user.tienda_id)))
+      || (req.user.rol === 'EMPLOYEE' && lead_id && !(await employeeLead(db, tenant_id, lead_id, req.user.user_id)))
+      || (cliente_id && lead_id)) {
+      return res.status(400).json({ success: false, error: 'Asocia la interacción a un único cliente o prospecto de la empresa.' });
+    }
     const result = await db.query(
       `INSERT INTO interacciones (tenant_id, cliente_id, lead_id, usuario_id, canal, mensaje, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [tenant_id, cliente_id || null, lead_id || null, req.user.user_id, canal, mensaje, metadata ? JSON.stringify(metadata) : null]
+      [tenant_id, cliente_id || null, lead_id || null, req.user.user_id, canal, mensaje.trim(), metadata ? JSON.stringify(metadata) : null]
     );
 
     res.status(201).json({
@@ -42,10 +51,14 @@ exports.obtenerInteracciones = async (req, res) => {
   }
 
   try {
+    if ((req.user.rol === 'EMPLOYEE' && cliente_id && !(await employeeClient(db, tenant_id, cliente_id, req.user.tienda_id)))
+      || (req.user.rol === 'EMPLOYEE' && lead_id && !(await employeeLead(db, tenant_id, lead_id, req.user.user_id)))) {
+      return res.status(404).json({ success: false, error: 'No se encontró el registro solicitado.' });
+    }
     let query = `
       SELECT i.*, u.nombre as nombre_usuario
       FROM interacciones i
-      LEFT JOIN usuarios u ON i.usuario_id = u.id
+      LEFT JOIN usuarios u ON i.usuario_id = u.id AND u.tenant_id = i.tenant_id
       WHERE i.tenant_id = $1
     `;
     let params = [tenant_id];

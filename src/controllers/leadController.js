@@ -1,22 +1,34 @@
 const db = require('../config/db');
+const { activeClient, activeLead, activeStore, activeUser, employeeLead } = require('../utils/tenantValidation');
 
 // 1. Crear un nuevo Prospecto (Lead)
 exports.crearLead = async (req, res) => {
   const { nombre, email, telefono, empresa_origen, valor_estimado, tienda_id, vendedor_id, cliente_id } = req.body;
   const tenant_id = req.user.tenant_id;
   const targetTiendaId = tienda_id || req.user.tienda_id;
-  const targetVendedorId = vendedor_id || req.user.user_id;
+  const targetVendedorId = req.user.rol === 'EMPLOYEE' ? req.user.user_id : (vendedor_id || req.user.user_id);
 
-  if (!nombre) {
+  if (typeof nombre !== 'string' || !nombre.trim() || nombre.trim().length > 120) {
     return res.status(400).json({ success: false, error: 'El nombre del prospecto es obligatorio.' });
+  }
+  const valorValidado = Number(valor_estimado || 0);
+  if (!Number.isFinite(valorValidado) || valorValidado < 0) {
+    return res.status(400).json({ success: false, error: 'El valor estimado debe ser un monto válido no negativo.' });
   }
 
   try {
+    if ((targetTiendaId && (!(await activeStore(db, tenant_id, targetTiendaId))
+      || (req.user.rol === 'EMPLOYEE' && targetTiendaId !== req.user.tienda_id)))
+      || !(await activeUser(db, tenant_id, targetVendedorId))
+      || (cliente_id && !(await activeClient(db, tenant_id, cliente_id)))) {
+      return res.status(400).json({ success: false, error: 'La sucursal, el vendedor o el cliente no pertenecen a la empresa.' });
+    }
+
     const result = await db.query(
       `INSERT INTO leads (tenant_id, tienda_id, vendedor_id, cliente_id, nombre, email, telefono, empresa_origen, valor_estimado)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [tenant_id, targetTiendaId || null, targetVendedorId || null, cliente_id || null, nombre, email || null, telefono || null, empresa_origen || null, valor_estimado || 0.00]
+      [tenant_id, targetTiendaId || null, targetVendedorId || null, cliente_id || null, nombre.trim(), email || null, telefono || null, empresa_origen || null, valorValidado]
     );
 
     res.status(201).json({
@@ -60,11 +72,11 @@ exports.obtenerPipeline = async (req, res) => {
   try {
     const query = `
       SELECT l.*, 
-             u.nombre as nombre_vendedor,
-             t.nombre as nombre_tienda
+                  u.nombre as nombre_vendedor,
+                  t.nombre as nombre_tienda
       FROM leads l
-      LEFT JOIN usuarios u ON l.vendedor_id = u.id
-      LEFT JOIN tiendas t ON l.tienda_id = t.id
+                LEFT JOIN usuarios u ON l.vendedor_id = u.id AND u.tenant_id = l.tenant_id
+                LEFT JOIN tiendas t ON l.tienda_id = t.id AND t.tenant_id = l.tenant_id
       WHERE ${conditions.join(' AND ')}
       ORDER BY l.actualizado_en DESC
     `;
@@ -93,6 +105,9 @@ exports.actualizarEtapaLead = async (req, res) => {
   }
 
   try {
+    if (req.user.rol === 'EMPLOYEE' && !(await employeeLead(db, tenant_id, id, req.user.user_id))) {
+      return res.status(404).json({ success: false, error: 'Prospecto no encontrado o sin permisos.' });
+    }
     const result = await db.query(
       `UPDATE leads 
        SET etapa = $1, motivo_cierre = COALESCE($2, motivo_cierre), actualizado_en = CURRENT_TIMESTAMP
@@ -126,6 +141,10 @@ exports.crearTareaLead = async (req, res) => {
   }
 
   try {
+    if (!(await activeLead(db, tenant_id, lead_id))
+      || (req.user.rol === 'EMPLOYEE' && !(await employeeLead(db, tenant_id, lead_id, req.user.user_id)))) {
+      return res.status(404).json({ success: false, error: 'El prospecto no existe en la empresa o no está asignado a este usuario.' });
+    }
     const result = await db.query(
       `INSERT INTO tareas_lead (tenant_id, lead_id, usuario_id, titulo, descripcion, tipo, fecha_vencimiento)
        VALUES ($1, $2, $3, $4, $5, $6, $7)

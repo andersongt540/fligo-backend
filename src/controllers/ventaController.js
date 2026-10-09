@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { obtenerDatosTasasBcv } = require('./configuracionController');
+const { activeClient, activeStore, isUuid } = require('../utils/tenantValidation');
 
 // 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
 exports.registrarVenta = async (req, res) => {
@@ -63,6 +64,12 @@ exports.registrarVenta = async (req, res) => {
   if (!productos || !Array.isArray(productos) || productos.length === 0) {
     return res.status(400).json({ success: false, error: 'La venta debe contener al menos un producto.' });
   }
+  if (productos.length > 100 || productos.some(item =>
+    !item || !isUuid(item.producto_id) || !Number.isInteger(Number(item.cantidad)) || Number(item.cantidad) <= 0 || Number(item.cantidad) > 2147483647
+    || (item.precio_unitario !== undefined && (item.precio_unitario === null || item.precio_unitario === '' || !Number.isFinite(Number(item.precio_unitario)) || Number(item.precio_unitario) < 0 || Number(item.precio_unitario) > 9999999999.99))
+  )) {
+    return res.status(400).json({ success: false, error: 'Cada producto debe tener un identificador, una cantidad entera positiva y un precio válido.' });
+  }
 
   if (!metodo_pago && !pagosValidados) {
     return res.status(400).json({ success: false, error: 'Debes especificar el método de pago.' });
@@ -71,11 +78,37 @@ exports.registrarVenta = async (req, res) => {
   if (!targetTiendaId) {
     return res.status(400).json({ success: false, error: 'Debes especificar la tienda donde se realiza la venta.' });
   }
+  if (!isUuid(targetTiendaId) || (cliente_id && !isUuid(cliente_id)) || (cotizacion_id && !isUuid(cotizacion_id))) {
+    return res.status(400).json({ success: false, error: 'La sucursal, el cliente o el presupuesto indicado no tiene un identificador válido.' });
+  }
 
   const client = await db.pool.connect();
 
   try {
     await client.query('BEGIN');
+
+    if (!(await activeStore(client, tenant_id, targetTiendaId))
+      || (req.user.rol === 'EMPLOYEE' && targetTiendaId !== req.user.tienda_id)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa, está inactiva o no está asignada a este usuario.' });
+    }
+
+    if (cliente_id && !(await activeClient(client, tenant_id, cliente_id))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'El cliente seleccionado no existe o no pertenece a la empresa.' });
+    }
+
+    if (cotizacion_id) {
+      const cotizacionRes = await client.query(
+        `SELECT id FROM cotizaciones
+         WHERE id = $1 AND tenant_id = $2 AND tienda_id = $3 AND estado <> 'CONVERTIDA'`,
+        [cotizacion_id, tenant_id, targetTiendaId]
+      );
+      if (!cotizacionRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: 'El presupuesto no existe en esta empresa o sucursal, o ya fue convertido.' });
+      }
+    }
 
     let subtotalCalculado = 0;
     const itemsProcesados = [];
@@ -85,7 +118,7 @@ exports.registrarVenta = async (req, res) => {
       const prodRes = await client.query(
         `SELECT p.id, p.precio_base, COALESCE(i.stock_actual, 0) as stock_actual
          FROM productos p
-         LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $1
+         LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $1 AND i.tenant_id = $3
          WHERE p.id = $2 AND p.tenant_id = $3 AND p.activo = TRUE
          FOR UPDATE OF p`,
         [targetTiendaId, item.producto_id, tenant_id]
@@ -98,21 +131,22 @@ exports.registrarVenta = async (req, res) => {
 
       const prod = prodRes.rows[0];
 
-      if (prod.stock_actual < item.cantidad) {
+      const cantidad = Number(item.cantidad);
+      if (prod.stock_actual < cantidad) {
         await client.query('ROLLBACK');
         return res.status(400).json({ 
           success: false, 
-          error: `Stock insuficiente para el producto ID ${item.producto_id}. Disponible: ${prod.stock_actual}, Solicitado: ${item.cantidad}` 
+          error: `Stock insuficiente para el producto ID ${item.producto_id}. Disponible: ${prod.stock_actual}, Solicitado: ${cantidad}`
         });
       }
 
-      const precioUnitario = item.precio_unitario !== undefined ? item.precio_unitario : parseFloat(prod.precio_base);
-      const subtotalItem = precioUnitario * item.cantidad;
+      const precioUnitario = item.precio_unitario !== undefined ? Number(item.precio_unitario) : Number(prod.precio_base);
+      const subtotalItem = precioUnitario * cantidad;
       subtotalCalculado += subtotalItem;
 
       itemsProcesados.push({
         producto_id: prod.id,
-        cantidad: item.cantidad,
+        cantidad,
         precio_unitario: precioUnitario,
         subtotal: subtotalItem,
         stock_actual: prod.stock_actual
@@ -121,7 +155,8 @@ exports.registrarVenta = async (req, res) => {
 
     const impuestoBase = Number(impuesto);
     const descuentoVenta = Number(descuento);
-    if (!Number.isFinite(impuestoBase) || impuestoBase < 0 || !Number.isFinite(descuentoVenta) || descuentoVenta < 0) {
+    if (!Number.isFinite(impuestoBase) || impuestoBase < 0 || impuestoBase > 9999999999.99
+      || !Number.isFinite(descuentoVenta) || descuentoVenta < 0 || descuentoVenta > 9999999999.99) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: 'El impuesto y el descuento deben ser montos válidos no negativos.' });
     }
@@ -138,6 +173,10 @@ exports.registrarVenta = async (req, res) => {
       igtfUsd = igtfUsdCentimos / 100;
     }
     const totalCalculado = subtotalCalculado + impuestoBase + igtfUsd - descuentoVenta;
+    if (!Number.isFinite(totalCalculado) || totalCalculado <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'El total de la venta debe ser un monto válido mayor que cero.' });
+    }
     if (pagosValidados) {
       const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + pago.monto_usd_centimos, 0);
       const vueltoBsCentimos = vueltoValidado
@@ -256,7 +295,7 @@ exports.crearCotizacion = async (req, res) => {
       'SELECT id FROM tiendas WHERE id = $1 AND tenant_id = $2 AND activa = TRUE',
       [targetTiendaId, tenant_id]
     );
-    if (tiendaRes.rows.length === 0) {
+    if (tiendaRes.rows.length === 0 || (req.user.rol === 'EMPLOYEE' && targetTiendaId !== req.user.tienda_id)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa o está inactiva.' });
     }
@@ -349,9 +388,9 @@ exports.obtenerCotizaciones = async (req, res) => {
   const tenant_id = req.user.tenant_id;
   const pageValue = Number.parseInt(req.query.page, 10);
   const limitValue = Number.parseInt(req.query.limit, 10);
-  const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
-  const limit = Number.isInteger(limitValue) && limitValue > 0 ? Math.min(limitValue, 100) : 100;
-  const offset = (page - 1) * limit;
+  const safePage = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const safeLimit = Number.isInteger(limitValue) && limitValue > 0 ? Math.min(limitValue, 100) : 100;
+  const offset = (safePage - 1) * safeLimit;
   const params = [tenant_id];
   const conditions = ['c.tenant_id = $1'];
 
@@ -371,9 +410,9 @@ exports.obtenerCotizaciones = async (req, res) => {
       `SELECT c.*, cl.nombre AS nombre_cliente, u.nombre AS nombre_vendedor, t.nombre AS nombre_tienda,
               COALESCE(d.productos, '[]'::json) AS productos
        FROM cotizaciones c
-       LEFT JOIN clientes cl ON c.cliente_id = cl.id
-       LEFT JOIN usuarios u ON c.usuario_id = u.id
-       LEFT JOIN tiendas t ON c.tienda_id = t.id
+      LEFT JOIN clientes cl ON c.cliente_id = cl.id AND cl.tenant_id = c.tenant_id
+      LEFT JOIN usuarios u ON c.usuario_id = u.id AND u.tenant_id = c.tenant_id
+      LEFT JOIN tiendas t ON c.tienda_id = t.id AND t.tenant_id = c.tenant_id
        LEFT JOIN LATERAL (
          SELECT json_agg(json_build_object(
            'producto_id', dc.producto_id,
@@ -383,16 +422,16 @@ exports.obtenerCotizaciones = async (req, res) => {
            'subtotal', dc.subtotal
          ) ORDER BY dc.id) AS productos
          FROM detalle_cotizacion dc
-         LEFT JOIN productos p ON dc.producto_id = p.id
+         LEFT JOIN productos p ON dc.producto_id = p.id AND p.tenant_id = c.tenant_id
          WHERE dc.cotizacion_id = c.id
        ) d ON TRUE
        WHERE ${conditions.join(' AND ')}
        ORDER BY c.creado_en DESC
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
-      [...params, limit, offset]
+      [...params, safeLimit, offset]
     );
 
-    res.json({ success: true, data: result.rows, page, limit });
+    res.json({ success: true, data: result.rows, page: safePage, limit: safeLimit });
   } catch (error) {
     console.error('Error en obtenerCotizaciones [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error al consultar los presupuestos.' });
@@ -442,13 +481,17 @@ exports.actualizarEstadoCotizacion = async (req, res) => {
 // 3. Listar Ventas por Tienda con Filtros
 exports.obtenerVentas = async (req, res) => {
   const tenant_id = req.user.tenant_id;
-  const { tienda_id, fecha_inicio, fecha_fin, page = 1, limit = 20 } = req.query;
+  const { tienda_id, fecha_inicio, fecha_fin } = req.query;
+  const pageValue = Number.parseInt(req.query.page, 10);
+  const limitValue = Number.parseInt(req.query.limit, 10);
+  const safePage = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const safeLimit = Number.isInteger(limitValue) && limitValue > 0 ? Math.min(limitValue, 100) : 20;
 
   const targetTiendaId = (req.user.rol === 'EMPLOYEE' && req.user.tienda_id)
     ? req.user.tienda_id
     : (tienda_id || req.user.tienda_id);
 
-  const offset = (page - 1) * limit;
+  const offset = (safePage - 1) * safeLimit;
   let params = [tenant_id];
   let conditions = ['v.tenant_id = $1'];
 
@@ -476,21 +519,21 @@ exports.obtenerVentas = async (req, res) => {
              u.nombre as nombre_vendedor,
              t.nombre as nombre_tienda
       FROM ventas v
-      LEFT JOIN clientes c ON v.cliente_id = c.id
-      LEFT JOIN usuarios u ON v.usuario_id = u.id
-      LEFT JOIN tiendas t ON v.tienda_id = t.id
+      LEFT JOIN clientes c ON v.cliente_id = c.id AND c.tenant_id = v.tenant_id
+      LEFT JOIN usuarios u ON v.usuario_id = u.id AND u.tenant_id = v.tenant_id
+      LEFT JOIN tiendas t ON v.tienda_id = t.id AND t.tenant_id = v.tenant_id
       WHERE ${whereClause}
       ORDER BY v.creado_en DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `;
 
-    const result = await db.query(query, [...params, limit, offset]);
+    const result = await db.query(query, [...params, safeLimit, offset]);
 
     res.json({
       success: true,
       data: result.rows,
-      page: parseInt(page),
-      limit: parseInt(limit)
+      page: safePage,
+      limit: safeLimit
     });
 
   } catch (error) {

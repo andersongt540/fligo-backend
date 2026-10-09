@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const firebaseTokenVerifier = require('../config/firebaseTokenVerifier');
 const { estadoSuscripcion } = require('../utils/suscripcion');
+const { activeStore } = require('../utils/tenantValidation');
 
 function createSession(user, res) {
   const token = jwt.sign(
@@ -198,8 +199,15 @@ exports.createEmpleado = async (req, res) => {
   if (!['MANAGER', 'EMPLOYEE'].includes(rol) || typeof password !== 'string' || password.length < 6) {
     return res.status(400).json({ success: false, error: 'El rol o la contraseña proporcionados no son válidos.' });
   }
+  if (typeof nombre !== 'string' || nombre.trim().length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    || password.length > 128) {
+    return res.status(400).json({ success: false, error: 'El nombre, correo o contraseña no cumplen el formato permitido.' });
+  }
 
   try {
+    if (tienda_id && !(await activeStore(db, tenant_id, tienda_id))) {
+      return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa o está inactiva.' });
+    }
     const existingUser = await db.query('SELECT id FROM usuarios WHERE LOWER(email) = $1', [email]);
     if (existingUser.rows.length > 0) {
       return res.status(400).json({ success: false, error: 'El correo electrónico ya está registrado en Fligo.' });
@@ -210,7 +218,7 @@ exports.createEmpleado = async (req, res) => {
       `INSERT INTO usuarios (tenant_id, tienda_id, nombre, email, password_hash, rol)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, nombre, email, rol, tienda_id, creado_en`,
-      [tenant_id, tienda_id || null, nombre, email, passwordHash, rol]
+      [tenant_id, tienda_id || null, nombre.trim(), email, passwordHash, rol]
     );
 
     res.status(201).json({
@@ -232,7 +240,7 @@ exports.getProfile = async (req, res) => {
               s.nombre as nombre_tienda
        FROM usuarios u
        JOIN tenants t ON u.tenant_id = t.id
-       LEFT JOIN tiendas s ON u.tienda_id = s.id
+      LEFT JOIN tiendas s ON u.tienda_id = s.id AND s.tenant_id = u.tenant_id
        WHERE u.id = $1`,
       [req.user.user_id]
     );

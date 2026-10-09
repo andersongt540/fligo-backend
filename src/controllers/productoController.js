@@ -1,13 +1,23 @@
 const db = require('../config/db');
+const { activeProduct, activeStore } = require('../utils/tenantValidation');
 
 // 1. Crear producto e inicializar inventario en las tiendas
 exports.crearProducto = async (req, res) => {
   const { codigo_sku, codigo_barras, nombre, descripcion, categoria, precio_base, costo, stock_inicial = 0, stock_minimo = 5, tienda_id } = req.body;
   const tenant_id = req.user.tenant_id;
   const tiendaAsignada = tienda_id || req.user.tienda_id;
+  const precioValidado = Number(precio_base);
+  const costoValidado = costo === undefined ? 0 : Number(costo);
+  const stockInicialValidado = Number(stock_inicial);
+  const stockMinimoValidado = Number(stock_minimo);
 
-  if (!codigo_sku || !nombre || precio_base === undefined) {
+  if (typeof codigo_sku !== 'string' || !codigo_sku.trim() || typeof nombre !== 'string' || !nombre.trim() || precio_base === undefined) {
     return res.status(400).json({ success: false, error: 'SKU, nombre y precio base son obligatorios.' });
+  }
+  if (!Number.isFinite(precioValidado) || precioValidado < 0 || !Number.isFinite(costoValidado) || costoValidado < 0
+    || !Number.isInteger(stockInicialValidado) || stockInicialValidado < 0
+    || !Number.isInteger(stockMinimoValidado) || stockMinimoValidado < 0) {
+    return res.status(400).json({ success: false, error: 'Precio, costo y cantidades de inventario deben ser valores válidos no negativos.' });
   }
 
   const client = await db.pool.connect();
@@ -15,12 +25,18 @@ exports.crearProducto = async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    if (tiendaAsignada && (!(await activeStore(client, tenant_id, tiendaAsignada))
+      || (req.user.rol === 'EMPLOYEE' && tiendaAsignada !== req.user.tienda_id))) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ success: false, error: 'La tienda seleccionada no pertenece a la empresa o no está asignada a este usuario.' });
+    }
+
     // Insertar Producto
     const productoRes = await client.query(
       `INSERT INTO productos (tenant_id, codigo_sku, codigo_barras, nombre, descripcion, categoria, precio_base, costo)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [tenant_id, codigo_sku, codigo_barras || null, nombre, descripcion || null, categoria || 'General', precio_base, costo || 0.00]
+      [tenant_id, codigo_sku.trim(), codigo_barras || null, nombre.trim(), descripcion || null, categoria || 'General', precioValidado, costoValidado]
     );
 
     const nuevoProducto = productoRes.rows[0];
@@ -30,15 +46,15 @@ exports.crearProducto = async (req, res) => {
       await client.query(
         `INSERT INTO inventario_tienda (tenant_id, tienda_id, producto_id, stock_actual, stock_minimo)
          VALUES ($1, $2, $3, $4, $5)`,
-        [tenant_id, tiendaAsignada, nuevoProducto.id, stock_inicial, stock_minimo]
+        [tenant_id, tiendaAsignada, nuevoProducto.id, stockInicialValidado, stockMinimoValidado]
       );
 
       // Registrar movimiento de stock inicial si fue mayor a 0
-      if (stock_inicial > 0) {
+      if (stockInicialValidado > 0) {
         await client.query(
           `INSERT INTO movimientos_inventario (tenant_id, tienda_id, producto_id, usuario_id, tipo_movimiento, cantidad, stock_resultante, motivo)
            VALUES ($1, $2, $3, $4, 'ENTRADA', $5, $5, 'Stock inicial de creación')`,
-          [tenant_id, tiendaAsignada, nuevoProducto.id, req.user.user_id, stock_inicial]
+          [tenant_id, tiendaAsignada, nuevoProducto.id, req.user.user_id, stockInicialValidado]
         );
       }
     }
@@ -66,7 +82,11 @@ exports.crearProducto = async (req, res) => {
 // 2. Obtener productos con stock por tienda y búsqueda rápida (Móvil/POS)
 exports.obtenerProductos = async (req, res) => {
   const tenant_id = req.user.tenant_id;
-  const { busqueda, categoria, tienda_id, bajo_stock, page = 1, limit = 20 } = req.query;
+  const { busqueda, categoria, tienda_id, bajo_stock } = req.query;
+  const pageValue = Number.parseInt(req.query.page, 10);
+  const limitValue = Number.parseInt(req.query.limit, 10);
+  const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const limit = Number.isInteger(limitValue) && limitValue > 0 ? Math.min(limitValue, 100) : 20;
 
   // Empleados consultan stock de su tienda asignada por defecto
   const targetTiendaId = (req.user.rol === 'EMPLOYEE' && req.user.tienda_id) 
@@ -100,8 +120,8 @@ exports.obtenerProductos = async (req, res) => {
              COALESCE(i.stock_minimo, 5) as stock_minimo,
              t.nombre as nombre_tienda
       FROM productos p
-      LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $${params.length + 1}
-      LEFT JOIN tiendas t ON i.tienda_id = t.id
+      LEFT JOIN inventario_tienda i ON p.id = i.producto_id AND i.tienda_id = $${params.length + 1} AND i.tenant_id = p.tenant_id
+      LEFT JOIN tiendas t ON i.tienda_id = t.id AND t.tenant_id = p.tenant_id
       WHERE ${whereClause}
       ORDER BY p.nombre ASC
       LIMIT $${params.length + 2} OFFSET $${params.length + 3}
@@ -136,11 +156,22 @@ exports.ajustarInventario = async (req, res) => {
   if (!['ENTRADA', 'SALIDA', 'AJUSTE'].includes(tipo_movimiento)) {
     return res.status(400).json({ success: false, error: 'Tipo de movimiento inválido.' });
   }
+  const cantidadValidada = Number(cantidad);
+  if (!Number.isInteger(cantidadValidada) || cantidadValidada < 0
+    || (tipo_movimiento !== 'AJUSTE' && cantidadValidada === 0)) {
+    return res.status(400).json({ success: false, error: 'La cantidad debe ser un entero válido y positivo, excepto en ajustes que admiten cero.' });
+  }
 
   const client = await db.pool.connect();
 
   try {
     await client.query('BEGIN');
+
+    if (!(await activeStore(client, tenant_id, targetTiendaId))
+      || !(await activeProduct(client, tenant_id, producto_id))) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'La tienda o el producto no existe en la empresa.' });
+    }
 
     // Obtener inventario actual o crearlo si no existe el registro en esa tienda
     let invRes = await client.query(
@@ -162,9 +193,9 @@ exports.ajustarInventario = async (req, res) => {
 
     // Calcular nuevo stock
     let nuevoStock = stockActual;
-    if (tipo_movimiento === 'ENTRADA') nuevoStock += parseInt(cantidad);
-    else if (tipo_movimiento === 'SALIDA') nuevoStock -= parseInt(cantidad);
-    else if (tipo_movimiento === 'AJUSTE') nuevoStock = parseInt(cantidad);
+    if (tipo_movimiento === 'ENTRADA') nuevoStock += cantidadValidada;
+    else if (tipo_movimiento === 'SALIDA') nuevoStock -= cantidadValidada;
+    else if (tipo_movimiento === 'AJUSTE') nuevoStock = cantidadValidada;
 
     if (nuevoStock < 0) {
       await client.query('ROLLBACK');
@@ -183,7 +214,7 @@ exports.ajustarInventario = async (req, res) => {
     await client.query(
       `INSERT INTO movimientos_inventario (tenant_id, tienda_id, producto_id, usuario_id, tipo_movimiento, cantidad, stock_resultante, motivo)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [tenant_id, targetTiendaId, producto_id, req.user.user_id, tipo_movimiento, cantidad, nuevoStock, motivo || 'Ajuste manual']
+      [tenant_id, targetTiendaId, producto_id, req.user.user_id, tipo_movimiento, cantidadValidada, nuevoStock, motivo || 'Ajuste manual']
     );
 
     await client.query('COMMIT');
