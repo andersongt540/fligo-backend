@@ -422,7 +422,7 @@ exports.liquidarDeuda = async (req, res) => {
       `UPDATE ventas
        SET metodo_pago = $1, impuesto = COALESCE(impuesto, 0) + $2, total = total + $2,
            estado_pago = 'PAGADA', saldo_pendiente = 0,
-           notas = CONCAT_WS(E'\\n', NULLIF(notas, ''), $3)
+           notas = CONCAT_WS(E'\\n', NULLIF(notas, ''), NULLIF($3::text, ''))
        WHERE id = $4 AND tenant_id = $5
        RETURNING *`,
       [metodoPagoFinal, igtfUsd, notaPago, id, req.user.tenant_id]

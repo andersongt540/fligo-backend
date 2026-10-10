@@ -168,6 +168,7 @@ test('settles a pending sale using multiple payment methods and records the brea
     assert.equal(update.params[0], 'MIXTO');
     assert.equal(update.params[1], 0.15);
     assert.match(update.params[2], /EFECTIVO 1007\.50 VES; DIVISA USD 5\.00 USD/);
+    assert.match(update.text, /NULLIF\(\$3::text, ''\)/);
     assert.equal(queries.some(query => query.text === 'COMMIT'), true);
   } finally {
     configuracionController.obtenerDatosTasasBcv = originalGetRates;
