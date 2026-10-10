@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const db = require('../src/config/db');
+const configuracionController = require('../src/controllers/configuracionController');
 const { registrarVenta, liquidarDeuda } = require('../src/controllers/ventaController');
 
 const tenantId = '11111111-1111-4111-8111-111111111111';
@@ -118,6 +119,58 @@ test('settles a pending sale and records the selected payment method', async () 
     assert.equal(queries.find(query => query.text.includes('UPDATE ventas')).params[0], 'PAGO_MOVIL');
     assert.equal(queries.some(query => query.text === 'COMMIT'), true);
   } finally {
+    db.pool.connect = originalConnect;
+  }
+});
+
+test('settles a pending sale using multiple payment methods and records the breakdown', async () => {
+  const queries = [];
+  const originalGetRates = configuracionController.obtenerDatosTasasBcv;
+  configuracionController.obtenerDatosTasasBcv = async () => ({ usd_ves: 50, eur_ves: 55 });
+  db.pool.connect = async () => ({
+    query: async (text, params) => {
+      queries.push({ text, params });
+      if (text.includes('SELECT id, tienda_id, estado, estado_pago')) {
+        return { rows: [{
+          id: '55555555-5555-4555-8555-555555555555',
+          tienda_id: storeId,
+          estado: 'COMPLETADA',
+          estado_pago: 'PENDIENTE',
+          total: '25.00',
+          saldo_pendiente: '25.00'
+        }] };
+      }
+      if (text.includes('UPDATE ventas')) {
+        return { rows: [{ id: params[3], metodo_pago: params[0], estado_pago: 'PAGADA', saldo_pendiente: '0.00' }] };
+      }
+      return { rows: [] };
+    },
+    release() {}
+  });
+
+  try {
+    const response = makeResponse();
+    await liquidarDeuda({
+      params: { id: '55555555-5555-4555-8555-555555555555' },
+      body: {
+        pagos: [
+          { metodo_pago: 'EFECTIVO', moneda: 'VES', monto: 1007.5 },
+          { metodo_pago: 'DIVISA', moneda: 'USD', monto: 5 }
+        ]
+      },
+      user: { tenant_id: tenantId, tienda_id: storeId, rol: 'OWNER' }
+    }, response);
+
+    const update = queries.find(query => query.text.includes('UPDATE ventas'));
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.data.estado_pago, 'PAGADA');
+    assert.equal(response.body.igtf_bs, 7.5);
+    assert.equal(update.params[0], 'MIXTO');
+    assert.equal(update.params[1], 0.15);
+    assert.match(update.params[2], /EFECTIVO 1007\.50 VES; DIVISA USD 5\.00 USD/);
+    assert.equal(queries.some(query => query.text === 'COMMIT'), true);
+  } finally {
+    configuracionController.obtenerDatosTasasBcv = originalGetRates;
     db.pool.connect = originalConnect;
   }
 });

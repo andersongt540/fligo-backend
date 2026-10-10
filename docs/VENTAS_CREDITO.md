@@ -1,6 +1,6 @@
 # Ventas a crédito y seguimiento de deudas
 
-Las ventas a crédito se registran desde el formulario de Ventas con el botón **Registrar venta a crédito**. Es obligatorio seleccionar un cliente; la venta descuenta inventario como las demás, queda con pago pendiente y aparece en **Deudas**, ordenada desde la más antigua. Al confirmar el pago, selecciona el método recibido y usa **Liquidar**. La venta se conserva en el historial con el método registrado, saldo cero y una nota de auditoría. Un pago en USD o EUR añade al total el IGTF estimado del 3%, calculado con la tasa BCV del momento.
+Las ventas a crédito se registran desde el formulario de Ventas con el botón **Registrar venta a crédito**. Es obligatorio seleccionar un cliente; la venta descuenta inventario como las demás, queda con pago pendiente y aparece en **Deudas**, ordenada desde la más antigua. Al elegir **Liquidar**, registra uno o varios métodos de pago con sus montos y monedas. La API valida que cubran el saldo pendiente y el IGTF aplicable antes de marcar la deuda como pagada. La venta se conserva en el historial con el método o la combinación de métodos, saldo cero y una nota de auditoría con el desglose. Los pagos en USD o EUR añaden al total el IGTF estimado del 3%, calculado con la tasa BCV del momento.
 
 ## Despliegue de base de datos
 

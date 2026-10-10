@@ -1,5 +1,5 @@
 const db = require('../config/db');
-const { obtenerDatosTasasBcv } = require('./configuracionController');
+const configuracionController = require('./configuracionController');
 const { activeClient, activeStore, isUuid } = require('../utils/tenantValidation');
 
 // 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
@@ -38,7 +38,7 @@ exports.registrarVenta = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Debes indicar al menos un método de pago válido y su monto.' });
     }
     try {
-      tasaPago = await obtenerDatosTasasBcv();
+      tasaPago = await configuracionController.obtenerDatosTasasBcv();
     } catch (error) {
       console.error('Error en registrarVenta [BCV]:', error);
       return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para convertir el pago y calcular el IGTF.' });
@@ -272,19 +272,49 @@ exports.registrarVenta = async (req, res) => {
 
 exports.liquidarDeuda = async (req, res) => {
   const { id } = req.params;
-  const { metodo_pago } = req.body || {};
-  const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA USD', 'DIVISA EUR']);
+  const { metodo_pago, pagos, moneda, monto } = req.body || {};
+  const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA']);
+  const metodosLegacy = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA USD', 'DIVISA EUR']);
+  const pagosNuevos = pagos !== undefined;
+  const metodoLegacy = metodo_pago === 'DIVISA' && ['USD', 'EUR'].includes(moneda)
+    ? `DIVISA ${moneda}`
+    : metodo_pago;
+  const pagosValidados = pagosNuevos
+    ? pagos
+    : monto !== undefined
+      ? [{ metodo_pago, moneda, monto }]
+      : null;
 
-  if (!isUuid(id) || !metodosPermitidos.has(metodo_pago)) {
-    return res.status(400).json({ success: false, error: 'La venta o el método de pago indicado no es válido.' });
+  if (!isUuid(id) || (pagosNuevos
+    ? !Array.isArray(pagosValidados) || pagosValidados.length === 0 || pagosValidados.length > 20
+      || pagosValidados.some(pago => !pago || !metodosPermitidos.has(pago.metodo_pago)
+        || !Number.isFinite(Number(pago.monto)) || Number(pago.monto) <= 0
+        || (pago.moneda !== undefined && !['VES', 'USD', 'EUR'].includes(pago.moneda))
+        || (pago.metodo_pago === 'DIVISA' && !['USD', 'EUR'].includes(pago.moneda))
+        || (pago.metodo_pago !== 'DIVISA' && pago.moneda !== undefined && pago.moneda !== 'VES'))
+    : pagosValidados
+      ? !metodosPermitidos.has(metodo_pago) || !Number.isFinite(Number(monto)) || Number(monto) <= 0
+        || (moneda !== undefined && !['VES', 'USD', 'EUR'].includes(moneda))
+        || (metodo_pago === 'DIVISA' && !['USD', 'EUR'].includes(moneda))
+        || (metodo_pago !== 'DIVISA' && moneda !== undefined && moneda !== 'VES')
+      : !metodosLegacy.has(metodoLegacy))) {
+    return res.status(400).json({ success: false, error: 'La venta o los métodos y montos de pago indicados no son válidos.' });
   }
 
-  let igtfUsd = 0;
-  let igtfBs = 0;
   let tasas = null;
-  if (metodo_pago.startsWith('DIVISA ')) {
+  if (pagosValidados) {
     try {
-      tasas = await obtenerDatosTasasBcv();
+      tasas = await configuracionController.obtenerDatosTasasBcv();
+    } catch (error) {
+      console.error('Error en liquidarDeuda [BCV]:', error);
+      return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para convertir los pagos y calcular el IGTF.' });
+    }
+    if (!(Number(tasas.usd_ves) > 0) || !(Number(tasas.eur_ves) > 0)) {
+      return res.status(502).json({ success: false, error: 'Las tasas BCV del dólar y euro deben ser válidas para liquidar la deuda.' });
+    }
+  } else if (metodoLegacy.startsWith('DIVISA ')) {
+    try {
+      tasas = await configuracionController.obtenerDatosTasasBcv();
     } catch (error) {
       console.error('Error en liquidarDeuda [BCV]:', error);
       return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para calcular el IGTF del pago en divisa.' });
@@ -294,11 +324,12 @@ exports.liquidarDeuda = async (req, res) => {
     }
   }
 
-  const client = await db.pool.connect();
+  let client;
   try {
+    client = await db.pool.connect();
     await client.query('BEGIN');
     const ventaResult = await client.query(
-      `SELECT id, tienda_id, estado, estado_pago, total
+      `SELECT id, tienda_id, estado, estado_pago, total, saldo_pendiente
        FROM ventas
        WHERE id = $1 AND tenant_id = $2
        FOR UPDATE`,
@@ -318,14 +349,73 @@ exports.liquidarDeuda = async (req, res) => {
       return res.status(409).json({ success: false, error: 'No se puede liquidar una venta anulada.' });
     }
 
-    if (metodo_pago.startsWith('DIVISA ')) {
-      const baseBsCentimos = Math.round(Number(venta.total) * Number(tasas.usd_ves) * 100);
-      const igtfBsCentimos = Math.round(baseBsCentimos * 0.03);
-      igtfBs = igtfBsCentimos / 100;
-      igtfUsd = Math.round(igtfBsCentimos / Number(tasas.usd_ves)) / 100;
+    const saldoUsdCentimos = Math.round(Number(venta.saldo_pendiente ?? venta.total) * 100);
+    if (!Number.isFinite(saldoUsdCentimos) || saldoUsdCentimos <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, error: 'Esta deuda no tiene un saldo válido para liquidar.' });
     }
+
+    let metodoPagoFinal = metodoLegacy;
+    let igtfUsdCentimos = 0;
+    let igtfBsCentimos = 0;
+    let pagosNota = null;
+    if (pagosValidados) {
+      const tasaUsd = Number(tasas.usd_ves);
+      const saldoBsCentimos = Math.round(saldoUsdCentimos * tasaUsd);
+      let baseDivisaRestanteCentimos = saldoBsCentimos;
+      let montoPagadoBsCentimos = 0;
+      const pagosConvertidos = pagosValidados.map(pago => {
+        const monedaPago = pago.moneda || (pago.metodo_pago === 'DIVISA' ? 'USD' : 'VES');
+        const montoPagoCentimos = Math.round(Number(pago.monto) * 100);
+        const tasaMoneda = monedaPago === 'EUR' ? Number(tasas.eur_ves) : monedaPago === 'USD' ? tasaUsd : 1;
+        const montoBsCentimos = monedaPago === 'VES'
+          ? montoPagoCentimos
+          : Math.round(montoPagoCentimos * tasaMoneda);
+        const baseIgtfCentimos = pago.metodo_pago === 'DIVISA'
+          ? Math.min(montoBsCentimos, baseDivisaRestanteCentimos)
+          : 0;
+        baseDivisaRestanteCentimos -= baseIgtfCentimos;
+        const pagoIgtfBsCentimos = pago.metodo_pago === 'DIVISA' ? Math.round(baseIgtfCentimos * 0.03) : 0;
+        igtfBsCentimos += pagoIgtfBsCentimos;
+        igtfUsdCentimos += Math.round(pagoIgtfBsCentimos / tasaUsd);
+        montoPagadoBsCentimos += montoBsCentimos;
+        return {
+          ...pago,
+          moneda: monedaPago,
+          monto: Number(pago.monto),
+          montoBsCentimos,
+          igtfBsCentimos: pagoIgtfBsCentimos
+        };
+      });
+      const totalDebidoBsCentimos = saldoBsCentimos + igtfBsCentimos;
+      const diferenciaCentimos = totalDebidoBsCentimos - montoPagadoBsCentimos;
+      if (Math.abs(diferenciaCentimos) > 1) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          error: diferenciaCentimos > 0
+            ? `Los pagos no cubren el saldo y el IGTF. Falta Bs. ${(diferenciaCentimos / 100).toFixed(2)}.`
+            : `Los pagos exceden el saldo y el IGTF por Bs. ${(-diferenciaCentimos / 100).toFixed(2)}.`
+        });
+      }
+      metodoPagoFinal = pagosConvertidos.length === 1
+        ? pagosConvertidos[0].metodo_pago === 'DIVISA'
+          ? `DIVISA ${pagosConvertidos[0].moneda}`
+          : pagosConvertidos[0].metodo_pago
+        : 'MIXTO';
+      pagosNota = `Pagos: ${pagosConvertidos.map(pago =>
+        `${pago.metodo_pago}${pago.metodo_pago === 'DIVISA' ? ` ${pago.moneda}` : ''} ${pago.monto.toFixed(2)} ${pago.moneda}`
+      ).join('; ')}.`;
+    } else if (metodoLegacy.startsWith('DIVISA ')) {
+      const baseBsCentimos = Math.round(saldoUsdCentimos * Number(tasas.usd_ves));
+      igtfBsCentimos = Math.round(baseBsCentimos * 0.03);
+      igtfUsdCentimos = Math.round(igtfBsCentimos / Number(tasas.usd_ves));
+    }
+    const igtfUsd = igtfUsdCentimos / 100;
+    const igtfBs = igtfBsCentimos / 100;
     const notaPago = [
-      `Deuda liquidada con ${metodo_pago} el ${new Date().toISOString()}.`,
+      `Deuda liquidada con ${metodoPagoFinal} el ${new Date().toISOString()}.`,
+      pagosNota,
       igtfUsd > 0 ? `IGTF estimado 3%: Bs. ${igtfBs.toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null
     ].filter(Boolean).join(' ');
     const result = await client.query(
@@ -335,16 +425,16 @@ exports.liquidarDeuda = async (req, res) => {
            notas = CONCAT_WS(E'\\n', NULLIF(notas, ''), $3)
        WHERE id = $4 AND tenant_id = $5
        RETURNING *`,
-      [metodo_pago, igtfUsd, notaPago, id, req.user.tenant_id]
+      [metodoPagoFinal, igtfUsd, notaPago, id, req.user.tenant_id]
     );
     await client.query('COMMIT');
     res.json({ success: true, message: 'Deuda liquidada correctamente.', igtf_bs: igtfBs, data: result.rows[0] });
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK');
     console.error('Error en liquidarDeuda [Fligo]:', error);
     res.status(500).json({ success: false, error: 'No se pudo liquidar la deuda.' });
   } finally {
-    client.release();
+    client?.release();
   }
 };
 
