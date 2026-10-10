@@ -8,6 +8,7 @@ router.use(verificarToken);
 // Ventas y POS
 router.post('/ventas', ventaController.registrarVenta);
 router.get('/ventas', ventaController.obtenerVentas);
+router.put('/ventas/:id/pago', ventaController.liquidarDeuda);
 
 // Cotizaciones / Presupuestos
 router.get('/cotizaciones', ventaController.obtenerCotizaciones);

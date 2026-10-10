@@ -21,8 +21,9 @@ Por esta decisión el backend no crea identidades en Firebase Admin. El usuario 
 
 ## Configuración de seguridad del backend
 
+- En Render, configura **Start Command** como `npm start` (no `node src/app.js`). El script ejecuta Node.js con `--use-system-ca`, necesario para validar certificados emitidos por autoridades del sistema.
 - Configura `CORS_ORIGINS` en Render como una lista separada por comas de los orígenes exactos que sirven el frontend, por ejemplo `https://fliigo.web.app,https://fliigo.app`. No incluyas comodines ni localhost en producción.
-- En producción son obligatorios `DATABASE_URL` y `JWT_SECRET`. Conserva `PGSSL_REJECT_UNAUTHORIZED` sin definir o en `true` para validar certificados PostgreSQL; no lo desactives en producción.
+- En producción son obligatorios `DATABASE_URL` y `JWT_SECRET`. Si el backend y PostgreSQL están en la misma región de Render, usa la **Internal Database URL**. Render cifra las conexiones internas TLS, pero sus certificados son autofirmados y no se pueden validar con `rejectUnauthorized: true`; configura `PGSSL_REJECT_UNAUTHORIZED=false` en el entorno del servicio backend para permitir ese certificado. TLS sigue activo, pero el cliente no valida la identidad del certificado, así que limita este ajuste a conexiones internas a Render. Para conexiones externas u otros proveedores, conserva la validación (variable sin definir o `true`) y usa la URL y CA recomendadas por el proveedor.
 - Los intentos de crear sesión y migrar cuentas están limitados por IP. El almacenamiento del límite es local al proceso; si Render ejecuta varias instancias, configura un almacén compartido para que el límite sea común a todas.
 - `.env` y `node_modules` están excluidos de Git. `.env` estuvo versionado anteriormente: si el repositorio se publicó o compartió, rota las credenciales que pudo contener. Quitar el archivo del siguiente commit no borra valores del historial anterior.
 

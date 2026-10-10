@@ -131,15 +131,21 @@ CREATE TABLE ventas (
     cliente_id UUID REFERENCES clientes(id) ON DELETE SET NULL,
     usuario_id UUID REFERENCES usuarios(id) ON DELETE SET NULL,
     cotizacion_id UUID REFERENCES cotizaciones(id) ON DELETE SET NULL,
-    metodo_pago VARCHAR(50) NOT NULL, -- 'EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA'
+    metodo_pago VARCHAR(50) NOT NULL, -- 'EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA', 'CREDITO'
     subtotal DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
     impuesto DECIMAL(12, 2) DEFAULT 0.00,
     descuento DECIMAL(12, 2) DEFAULT 0.00,
     total DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
     estado VARCHAR(30) DEFAULT 'COMPLETADA', -- 'COMPLETADA', 'ANULADA'
+    estado_pago VARCHAR(20) NOT NULL DEFAULT 'PAGADA',
+    saldo_pendiente DECIMAL(12, 2) NOT NULL DEFAULT 0.00,
     notas TEXT,
     creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX idx_ventas_deudas_pendientes
+    ON ventas (tenant_id, tienda_id, creado_en DESC)
+    WHERE estado_pago = 'PENDIENTE';
 
 -- Detalle de Ítems de la Venta
 CREATE TABLE detalle_venta (

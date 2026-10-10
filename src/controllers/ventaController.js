@@ -8,6 +8,7 @@ exports.registrarVenta = async (req, res) => {
   const tenant_id = req.user.tenant_id;
   const targetTiendaId = tienda_id || req.user.tienda_id;
   const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA']);
+  const esCredito = metodo_pago === 'CREDITO';
   let pagosValidados = null;
   let tasaPago = null;
   let igtfUsd = 0;
@@ -21,6 +22,10 @@ exports.registrarVenta = async (req, res) => {
       return res.status(400).json({ success: false, error: 'El vuelto en dólares y bolívares debe tener montos válidos no negativos.' });
     }
     vueltoValidado = { usd, ves };
+  }
+
+  if (esCredito && (pagos !== undefined || !cliente_id)) {
+    return res.status(400).json({ success: false, error: 'Las ventas a crédito requieren un cliente y no pueden incluir pagos al registrarlas.' });
   }
 
   if (pagos !== undefined) {
@@ -71,7 +76,7 @@ exports.registrarVenta = async (req, res) => {
     return res.status(400).json({ success: false, error: 'Cada producto debe tener un identificador, una cantidad entera positiva y un precio válido.' });
   }
 
-  if (!metodo_pago && !pagosValidados) {
+  if ((!metodo_pago || (!esCredito && !metodosPermitidos.has(metodo_pago))) && !pagosValidados) {
     return res.status(400).json({ success: false, error: 'Debes especificar el método de pago.' });
   }
 
@@ -206,10 +211,10 @@ exports.registrarVenta = async (req, res) => {
 
     // Insertar Cabecera de Venta
     const ventaRes = await client.query(
-      `INSERT INTO ventas (tenant_id, tienda_id, cliente_id, usuario_id, cotizacion_id, metodo_pago, subtotal, impuesto, descuento, total, notas)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO ventas (tenant_id, tienda_id, cliente_id, usuario_id, cotizacion_id, metodo_pago, subtotal, impuesto, descuento, total, notas, estado_pago, saldo_pendiente)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
-      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodoPagoVenta, subtotalCalculado, impuestoBase + igtfUsd, descuentoVenta, totalCalculado, notasVenta]
+      [tenant_id, targetTiendaId, cliente_id || null, req.user.user_id, cotizacion_id || null, metodoPagoVenta, subtotalCalculado, impuestoBase + igtfUsd, descuentoVenta, totalCalculado, notasVenta, esCredito ? 'PENDIENTE' : 'PAGADA', esCredito ? totalCalculado : 0]
     );
 
     const nuevaVenta = ventaRes.rows[0];
@@ -260,6 +265,84 @@ exports.registrarVenta = async (req, res) => {
     await client.query('ROLLBACK');
     console.error('Error en registrarVenta [Fligo]:', error);
     res.status(500).json({ success: false, error: 'Error al procesar la venta.' });
+  } finally {
+    client.release();
+  }
+};
+
+exports.liquidarDeuda = async (req, res) => {
+  const { id } = req.params;
+  const { metodo_pago } = req.body || {};
+  const metodosPermitidos = new Set(['EFECTIVO', 'PAGO_MOVIL', 'TRANSFERENCIA', 'TARJETA', 'DIVISA USD', 'DIVISA EUR']);
+
+  if (!isUuid(id) || !metodosPermitidos.has(metodo_pago)) {
+    return res.status(400).json({ success: false, error: 'La venta o el método de pago indicado no es válido.' });
+  }
+
+  let igtfUsd = 0;
+  let igtfBs = 0;
+  let tasas = null;
+  if (metodo_pago.startsWith('DIVISA ')) {
+    try {
+      tasas = await obtenerDatosTasasBcv();
+    } catch (error) {
+      console.error('Error en liquidarDeuda [BCV]:', error);
+      return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para calcular el IGTF del pago en divisa.' });
+    }
+    if (!(Number(tasas.usd_ves) > 0)) {
+      return res.status(502).json({ success: false, error: 'La tasa BCV del dólar no es válida para calcular el IGTF.' });
+    }
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ventaResult = await client.query(
+      `SELECT id, tienda_id, estado, estado_pago, total
+       FROM ventas
+       WHERE id = $1 AND tenant_id = $2
+       FOR UPDATE`,
+      [id, req.user.tenant_id]
+    );
+    const venta = ventaResult.rows[0];
+    if (!venta || (req.user.rol === 'EMPLOYEE' && venta.tienda_id !== req.user.tienda_id)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'La venta no existe o no está disponible en esta sucursal.' });
+    }
+    if (venta.estado_pago !== 'PENDIENTE') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, error: 'Esta deuda ya fue liquidada.' });
+    }
+    if (venta.estado === 'ANULADA') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ success: false, error: 'No se puede liquidar una venta anulada.' });
+    }
+
+    if (metodo_pago.startsWith('DIVISA ')) {
+      const baseBsCentimos = Math.round(Number(venta.total) * Number(tasas.usd_ves) * 100);
+      const igtfBsCentimos = Math.round(baseBsCentimos * 0.03);
+      igtfBs = igtfBsCentimos / 100;
+      igtfUsd = Math.round(igtfBsCentimos / Number(tasas.usd_ves)) / 100;
+    }
+    const notaPago = [
+      `Deuda liquidada con ${metodo_pago} el ${new Date().toISOString()}.`,
+      igtfUsd > 0 ? `IGTF estimado 3%: Bs. ${igtfBs.toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null
+    ].filter(Boolean).join(' ');
+    const result = await client.query(
+      `UPDATE ventas
+       SET metodo_pago = $1, impuesto = COALESCE(impuesto, 0) + $2, total = total + $2,
+           estado_pago = 'PAGADA', saldo_pendiente = 0,
+           notas = CONCAT_WS(E'\\n', NULLIF(notas, ''), $3)
+       WHERE id = $4 AND tenant_id = $5
+       RETURNING *`,
+      [metodo_pago, igtfUsd, notaPago, id, req.user.tenant_id]
+    );
+    await client.query('COMMIT');
+    res.json({ success: true, message: 'Deuda liquidada correctamente.', igtf_bs: igtfBs, data: result.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error en liquidarDeuda [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'No se pudo liquidar la deuda.' });
   } finally {
     client.release();
   }
@@ -481,7 +564,7 @@ exports.actualizarEstadoCotizacion = async (req, res) => {
 // 3. Listar Ventas por Tienda con Filtros
 exports.obtenerVentas = async (req, res) => {
   const tenant_id = req.user.tenant_id;
-  const { tienda_id, fecha_inicio, fecha_fin } = req.query;
+  const { tienda_id, fecha_inicio, fecha_fin, estado_pago } = req.query;
   const pageValue = Number.parseInt(req.query.page, 10);
   const limitValue = Number.parseInt(req.query.limit, 10);
   const safePage = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
@@ -510,12 +593,22 @@ exports.obtenerVentas = async (req, res) => {
     conditions.push(`v.creado_en <= $${params.length}`);
   }
 
+  if (estado_pago !== undefined) {
+    if (!['PENDIENTE', 'PAGADA'].includes(estado_pago)) {
+      return res.status(400).json({ success: false, error: 'El estado de pago solicitado no es válido.' });
+    }
+    params.push(estado_pago);
+    conditions.push(`v.estado_pago = $${params.length}`);
+  }
+
   const whereClause = conditions.join(' AND ');
 
   try {
     const query = `
       SELECT v.*, 
              c.nombre as nombre_cliente, 
+             c.telefono as telefono_cliente,
+             c.documento_identidad as documento_cliente,
              u.nombre as nombre_vendedor,
              t.nombre as nombre_tienda
       FROM ventas v
@@ -523,7 +616,7 @@ exports.obtenerVentas = async (req, res) => {
       LEFT JOIN usuarios u ON v.usuario_id = u.id AND u.tenant_id = v.tenant_id
       LEFT JOIN tiendas t ON v.tienda_id = t.id AND t.tenant_id = v.tenant_id
       WHERE ${whereClause}
-      ORDER BY v.creado_en DESC
+      ORDER BY v.creado_en ${estado_pago === 'PENDIENTE' ? 'ASC' : 'DESC'}, v.id ASC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `;
 
