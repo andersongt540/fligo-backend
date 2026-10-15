@@ -3,11 +3,13 @@ const router = express.Router();
 const configuracionController = require('../controllers/configuracionController');
 const { verificarToken, autorizarRoles } = require('../middlewares/authMiddleware');
 
+// Ruta pública de versión (no requiere token de autenticación)
+router.get('/version', configuracionController.obtenerVersionApp);
+
 router.use(verificarToken);
 
 // Configuración general de la empresa
 router.get('/tasas-bcv', configuracionController.obtenerTasasBcv);
-router.get('/version', configuracionController.obtenerVersionApp);
 router.get('/', configuracionController.obtenerConfiguracion);
 router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
 
