@@ -193,3 +193,16 @@ exports.obtenerTiendas = async (req, res) => {
     res.status(500).json({ success: false, error: 'Error al obtener la lista de tiendas.' });
   }
 };
+
+exports.obtenerVersionApp = async (req, res) => {
+  return res.json({
+    success: true,
+    data: {
+      version_code: 1,
+      version_name: "1.0.0",
+      apk_url: process.env.LATEST_APK_URL || "https://github.com/achacon/fliigo/releases/download/v1.0.0/app-release.apk",
+      novedades: "Actualización disponible con nuevas funciones de control y pagos.",
+      forzar_actualizacion: false
+    }
+  });
+};

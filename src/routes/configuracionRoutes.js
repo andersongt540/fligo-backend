@@ -7,6 +7,7 @@ router.use(verificarToken);
 
 // Configuración general de la empresa
 router.get('/tasas-bcv', configuracionController.obtenerTasasBcv);
+router.get('/version', configuracionController.obtenerVersionApp);
 router.get('/', configuracionController.obtenerConfiguracion);
 router.put('/', autorizarRoles('OWNER'), configuracionController.actualizarConfiguracion);
 
