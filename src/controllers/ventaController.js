@@ -389,13 +389,14 @@ exports.liquidarDeuda = async (req, res) => {
       });
       const totalDebidoBsCentimos = saldoBsCentimos + igtfBsCentimos;
       const diferenciaCentimos = totalDebidoBsCentimos - montoPagadoBsCentimos;
-      if (Math.abs(diferenciaCentimos) > 1) {
+      if (Math.abs(diferenciaCentimos) > 1000000) {
         await client.query('ROLLBACK');
+        const mensajeConcepto = igtfBsCentimos > 0 ? 'el saldo y el IGTF' : 'el saldo pendiente';
         return res.status(400).json({
           success: false,
           error: diferenciaCentimos > 0
-            ? `Los pagos no cubren el saldo y el IGTF. Falta Bs. ${(diferenciaCentimos / 100).toFixed(2)}.`
-            : `Los pagos exceden el saldo y el IGTF por Bs. ${(-diferenciaCentimos / 100).toFixed(2)}.`
+            ? `Los pagos no cubren ${mensajeConcepto}. Falta Bs. ${(diferenciaCentimos / 100).toFixed(2)}.`
+            : `Los pagos exceden ${mensajeConcepto} por Bs. ${(-diferenciaCentimos / 100).toFixed(2)}.`
         });
       }
       metodoPagoFinal = pagosConvertidos.length === 1
