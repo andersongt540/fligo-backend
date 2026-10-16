@@ -183,14 +183,15 @@ exports.registrarVenta = async (req, res) => {
       return res.status(400).json({ success: false, error: 'El total de la venta debe ser un monto válido mayor que cero.' });
     }
     if (pagosValidados) {
-      const montoPagadoCentavos = pagosValidados.reduce((total, pago) => total + pago.monto_usd_centimos, 0);
+      const totalDueBsCentimos = Math.round(totalCalculado * tasaPago.usd_ves * 100);
+      const montoPagadoBsCentimos = pagosValidados.reduce((total, pago) => total + pago.monto_bs_centimos, 0);
       const vueltoBsCentimos = vueltoValidado
         ? Math.round(vueltoValidado.usd * tasaPago.usd_ves * 100) + Math.round(vueltoValidado.ves * 100)
         : 0;
-      const vueltoUsdCentimos = Math.round(vueltoBsCentimos / tasaPago.usd_ves);
-      if (vueltoUsdCentimos > montoPagadoCentavos || Math.abs(montoPagadoCentavos - vueltoUsdCentimos - Math.round(totalCalculado * 100)) > 1) {
+      const diferenciaBsCentimos = totalDueBsCentimos - (montoPagadoBsCentimos - vueltoBsCentimos);
+      if (Math.abs(diferenciaBsCentimos) > 500) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ success: false, error: 'Los montos recibidos menos el vuelto deben cubrir exactamente el total de la venta y el IGTF.' });
+        return res.status(400).json({ success: false, error: 'Los montos recibidos menos el vuelto deben cubrir el total de la venta.' });
       }
     }
     const metodoPagoVenta = pagosValidados

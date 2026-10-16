@@ -198,11 +198,11 @@ exports.obtenerVersionApp = async (req, res) => {
   return res.json({
     success: true,
     data: {
-      version_code: 1,
-      version_name: "1.0.0",
-      apk_url: process.env.LATEST_APK_URL || "https://github.com/achacon/fliigo/releases/download/v1.0.0/app-release.apk",
-      novedades: "Actualización disponible con nuevas funciones de control y pagos.",
-      forzar_actualizacion: false
+      version_code: Number(process.env.LATEST_VERSION_CODE || 2),
+      version_name: process.env.LATEST_VERSION_NAME || "1.1.0",
+      apk_url: process.env.LATEST_APK_URL || "https://github.com/andersongt540/fliigo-apk/releases/download/v0.0.6/app-release.apk",
+      novedades: process.env.LATEST_NOVEDADES || "Actualización disponible con mejoras en deudas, pagos y liquidación.",
+      forzar_actualizacion: process.env.FORZAR_ACTUALIZACION === 'true'
     }
   });
 };
