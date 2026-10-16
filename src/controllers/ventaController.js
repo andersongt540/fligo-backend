@@ -726,3 +726,46 @@ exports.obtenerVentas = async (req, res) => {
     res.status(500).json({ success: false, error: 'Error al consultar el historial de ventas.' });
   }
 };
+
+exports.obtenerVentaPorId = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const ventaRes = await db.query(
+      `SELECT v.*,
+              c.nombre as nombre_cliente,
+              c.telefono as telefono_cliente,
+              c.documento_identidad as documento_cliente,
+              c.email as email_cliente,
+              u.nombre as nombre_vendedor,
+              t.nombre as nombre_tienda
+       FROM ventas v
+       LEFT JOIN clientes c ON v.cliente_id = c.id AND c.tenant_id = v.tenant_id
+       LEFT JOIN usuarios u ON v.usuario_id = u.id AND u.tenant_id = v.tenant_id
+       LEFT JOIN tiendas t ON v.tienda_id = t.id AND t.tenant_id = v.tenant_id
+       WHERE v.id = $1 AND v.tenant_id = $2`,
+      [id, tenant_id]
+    );
+
+    if (!ventaRes.rows.length) {
+      return res.status(404).json({ success: false, error: 'Venta no encontrada.' });
+    }
+
+    const itemsRes = await db.query(
+      `SELECT dv.*, p.nombre as nombre_producto, p.codigo_sku
+       FROM detalle_venta dv
+       LEFT JOIN productos p ON dv.producto_id = p.id AND p.tenant_id = $2
+       WHERE dv.venta_id = $1`,
+      [id, tenant_id]
+    );
+
+    const ventaData = ventaRes.rows[0];
+    ventaData.items = itemsRes.rows;
+
+    return res.json({ success: true, data: ventaData });
+  } catch (error) {
+    console.error('Error en obtenerVentaPorId [Fligo]:', error);
+    return res.status(500).json({ success: false, error: 'Error al consultar el detalle de la venta.' });
+  }
+};
