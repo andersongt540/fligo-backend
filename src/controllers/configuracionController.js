@@ -119,9 +119,12 @@ exports.obtenerConfiguracion = async (req, res) => {
 // 2. Actualizar configuración de la empresa (Moneda, Tasa, Impuestos)
 exports.actualizarConfiguracion = async (req, res) => {
   const tenant_id = req.user.tenant_id;
-  const { logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal } = req.body;
+  const { nombre_empresa, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal } = req.body;
 
   try {
+    if (nombre_empresa) {
+      await db.query(`UPDATE tenants SET nombre_empresa = $1 WHERE id = $2`, [nombre_empresa, tenant_id]);
+    }
     const result = await db.query(
       `INSERT INTO configuracion_empresa (tenant_id, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
