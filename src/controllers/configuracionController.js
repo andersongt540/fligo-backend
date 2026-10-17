@@ -122,6 +122,13 @@ exports.actualizarConfiguracion = async (req, res) => {
   const { nombre_empresa, telefono_contacto, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal, margen_ganancia_defecto } = req.body;
 
   try {
+    try {
+      await db.query(`ALTER TABLE configuracion_empresa ADD COLUMN IF NOT EXISTS telefono_contacto VARCHAR(30);`);
+      await db.query(`ALTER TABLE configuracion_empresa ADD COLUMN IF NOT EXISTS margen_ganancia_defecto DECIMAL(5, 2) DEFAULT 30.00;`);
+    } catch (migErr) {
+      console.error('Aviso de migración automática:', migErr.message);
+    }
+
     if (nombre_empresa) {
       await db.query(`UPDATE tenants SET nombre_empresa = $1 WHERE id = $2`, [nombre_empresa, tenant_id]);
     }
@@ -150,7 +157,7 @@ exports.actualizarConfiguracion = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en actualizarConfiguracion [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al guardar la configuración.' });
+    res.status(500).json({ success: false, error: 'Error al guardar la configuración: ' + error.message });
   }
 };
 
