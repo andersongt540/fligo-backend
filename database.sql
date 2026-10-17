@@ -217,6 +217,7 @@ CREATE TABLE configuracion_empresa (
     direccion_fiscal TEXT,
     documento_fiscal VARCHAR(50), -- RIF / NIT / DNI Fiscal
     telefono_contacto VARCHAR(30),
+    margen_ganancia_defecto DECIMAL(5, 2) DEFAULT 30.00,
     actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
