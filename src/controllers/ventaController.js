@@ -702,12 +702,29 @@ exports.obtenerVentas = async (req, res) => {
              c.telefono as telefono_cliente,
              c.documento_identidad as documento_cliente,
              u.nombre as nombre_vendedor,
-             t.nombre as nombre_tienda
+             t.nombre as nombre_tienda,
+             COALESCE(
+               json_agg(
+                 json_build_object(
+                   'id', dv.id,
+                   'venta_id', dv.venta_id,
+                   'producto_id', dv.producto_id,
+                   'cantidad', dv.cantidad,
+                   'precio_unitario', dv.precio_unitario,
+                   'subtotal', dv.subtotal,
+                   'nombre_producto', p.nombre,
+                   'codigo_sku', p.codigo_sku
+                 )
+               ) FILTER (WHERE dv.id IS NOT NULL), '[]'
+             ) as items
       FROM ventas v
       LEFT JOIN clientes c ON v.cliente_id = c.id AND c.tenant_id = v.tenant_id
       LEFT JOIN usuarios u ON v.usuario_id = u.id AND u.tenant_id = v.tenant_id
       LEFT JOIN tiendas t ON v.tienda_id = t.id AND t.tenant_id = v.tenant_id
+      LEFT JOIN detalles_venta dv ON dv.venta_id = v.id AND dv.tenant_id = v.tenant_id
+      LEFT JOIN productos p ON dv.producto_id = p.id AND p.tenant_id = v.tenant_id
       WHERE ${whereClause}
+      GROUP BY v.id, c.nombre, c.telefono, c.documento_identidad, u.nombre, t.nombre
       ORDER BY v.creado_en ${estado_pago === 'PENDIENTE' ? 'ASC' : 'DESC'}, v.id ASC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}
     `;
