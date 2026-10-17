@@ -216,6 +216,7 @@ CREATE TABLE configuracion_empresa (
     tasa_cambio DECIMAL(12, 4) DEFAULT 1.0000,
     direccion_fiscal TEXT,
     documento_fiscal VARCHAR(50), -- RIF / NIT / DNI Fiscal
+    telefono_contacto VARCHAR(30),
     actualizado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

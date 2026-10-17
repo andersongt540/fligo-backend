@@ -119,15 +119,15 @@ exports.obtenerConfiguracion = async (req, res) => {
 // 2. Actualizar configuración de la empresa (Moneda, Tasa, Impuestos)
 exports.actualizarConfiguracion = async (req, res) => {
   const tenant_id = req.user.tenant_id;
-  const { nombre_empresa, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal } = req.body;
+  const { nombre_empresa, telefono_contacto, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal } = req.body;
 
   try {
     if (nombre_empresa) {
       await db.query(`UPDATE tenants SET nombre_empresa = $1 WHERE id = $2`, [nombre_empresa, tenant_id]);
     }
     const result = await db.query(
-      `INSERT INTO configuracion_empresa (tenant_id, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO configuracion_empresa (tenant_id, logo_url, moneda_principal, simbolo_moneda, impuesto_defecto, tasa_cambio, direccion_fiscal, documento_fiscal, telefono_contacto)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (tenant_id) DO UPDATE SET
          logo_url = COALESCE(EXCLUDED.logo_url, configuracion_empresa.logo_url),
          moneda_principal = COALESCE(EXCLUDED.moneda_principal, configuracion_empresa.moneda_principal),
@@ -136,9 +136,10 @@ exports.actualizarConfiguracion = async (req, res) => {
          tasa_cambio = COALESCE(EXCLUDED.tasa_cambio, configuracion_empresa.tasa_cambio),
          direccion_fiscal = COALESCE(EXCLUDED.direccion_fiscal, configuracion_empresa.direccion_fiscal),
          documento_fiscal = COALESCE(EXCLUDED.documento_fiscal, configuracion_empresa.documento_fiscal),
+         telefono_contacto = COALESCE(EXCLUDED.telefono_contacto, configuracion_empresa.telefono_contacto),
          actualizado_en = CURRENT_TIMESTAMP
        RETURNING *`,
-      [tenant_id, logo_url || null, moneda_principal || 'USD', simbolo_moneda || '$', impuesto_defecto || 16.00, tasa_cambio || 1.0000, direccion_fiscal || null, documento_fiscal || null]
+      [tenant_id, logo_url || null, moneda_principal || 'USD', simbolo_moneda || '$', impuesto_defecto || 16.00, tasa_cambio || 1.0000, direccion_fiscal || null, documento_fiscal || null, telefono_contacto || null]
     );
 
     res.json({
