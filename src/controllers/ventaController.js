@@ -721,8 +721,8 @@ exports.obtenerVentas = async (req, res) => {
         const itemsRes = await db.query(
           `SELECT dv.*, p.nombre as nombre_producto, p.codigo_sku
            FROM detalle_venta dv
-           LEFT JOIN productos p ON dv.producto_id = p.id AND p.tenant_id = dv.tenant_id
-           WHERE dv.venta_id = ANY($1::uuid[]) AND dv.tenant_id = $2`,
+           LEFT JOIN productos p ON dv.producto_id = p.id AND p.tenant_id = $2
+           WHERE dv.venta_id = ANY($1::uuid[])`,
           [ventaIds, tenant_id]
         );
         const itemsByVenta = {};
