@@ -702,22 +702,7 @@ exports.obtenerVentas = async (req, res) => {
              c.telefono as telefono_cliente,
              c.documento_identidad as documento_cliente,
              u.nombre as nombre_vendedor,
-             t.nombre as nombre_tienda,
-             COALESCE((
-               SELECT json_agg(json_build_object(
-                 'id', dv.id,
-                 'venta_id', dv.venta_id,
-                 'producto_id', dv.producto_id,
-                 'cantidad', dv.cantidad,
-                 'precio_unitario', dv.precio_unitario,
-                 'subtotal', dv.subtotal,
-                 'nombre_producto', p.nombre,
-                 'codigo_sku', p.codigo_sku
-               ))
-               FROM detalle_venta dv
-               LEFT JOIN productos p ON dv.producto_id = p.id AND p.tenant_id = dv.tenant_id
-               WHERE dv.venta_id = v.id AND dv.tenant_id = v.tenant_id
-             ), '[]'::json) as items
+             t.nombre as nombre_tienda
       FROM ventas v
       LEFT JOIN clientes c ON v.cliente_id = c.id AND c.tenant_id = v.tenant_id
       LEFT JOIN usuarios u ON v.usuario_id = u.id AND u.tenant_id = v.tenant_id
@@ -728,17 +713,42 @@ exports.obtenerVentas = async (req, res) => {
     `;
 
     const result = await db.query(query, [...params, safeLimit, offset]);
+    const ventas = result.rows;
+
+    if (ventas.length > 0) {
+      try {
+        const ventaIds = ventas.map(v => v.id);
+        const itemsRes = await db.query(
+          `SELECT dv.*, p.nombre as nombre_producto, p.codigo_sku
+           FROM detalle_venta dv
+           LEFT JOIN productos p ON dv.producto_id = p.id AND p.tenant_id = dv.tenant_id
+           WHERE dv.venta_id = ANY($1::uuid[]) AND dv.tenant_id = $2`,
+          [ventaIds, tenant_id]
+        );
+        const itemsByVenta = {};
+        itemsRes.rows.forEach(item => {
+          if (!itemsByVenta[item.venta_id]) itemsByVenta[item.venta_id] = [];
+          itemsByVenta[item.venta_id].push(item);
+        });
+        ventas.forEach(v => {
+          v.items = itemsByVenta[v.id] || [];
+        });
+      } catch (itemErr) {
+        console.error('Error al consultar items de ventas:', itemErr);
+        ventas.forEach(v => { v.items = []; });
+      }
+    }
 
     res.json({
       success: true,
-      data: result.rows,
+      data: ventas,
       page: safePage,
       limit: safeLimit
     });
 
   } catch (error) {
     console.error('Error en obtenerVentas [Fligo]:', error);
-    res.status(500).json({ success: false, error: 'Error al consultar el historial de ventas.' });
+    res.status(500).json({ success: false, error: 'Error al consultar el historial de ventas: ' + error.message });
   }
 };
 
