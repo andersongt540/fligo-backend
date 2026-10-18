@@ -8,5 +8,7 @@ router.use(verificarToken);
 router.post('/', autorizarRoles('OWNER', 'MANAGER'), productoController.crearProducto);
 router.get('/', productoController.obtenerProductos);
 router.post('/inventario/ajustar', autorizarRoles('OWNER', 'MANAGER'), productoController.ajustarInventario);
+router.put('/:id', autorizarRoles('OWNER', 'MANAGER'), productoController.actualizarProducto);
+router.delete('/:id', autorizarRoles('OWNER', 'MANAGER'), productoController.eliminarProducto);
 
 module.exports = router;

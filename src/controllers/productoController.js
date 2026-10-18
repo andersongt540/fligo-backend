@@ -233,3 +233,65 @@ exports.ajustarInventario = async (req, res) => {
     client.release();
   }
 };
+
+// 4. Actualizar producto (Editar)
+exports.actualizarProducto = async (req, res) => {
+  const { id } = req.params;
+  const { codigo_sku, codigo_barras, nombre, descripcion, categoria, precio_base, costo } = req.body;
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `UPDATE productos
+       SET codigo_sku = COALESCE($1, codigo_sku),
+           codigo_barras = COALESCE($2, codigo_barras),
+           nombre = COALESCE($3, nombre),
+           descripcion = COALESCE($4, descripcion),
+           categoria = COALESCE($5, categoria),
+           precio_base = COALESCE($6, precio_base),
+           costo = COALESCE($7, costo),
+           actualizado_en = CURRENT_TIMESTAMP
+       WHERE id = $8 AND tenant_id = $9
+       RETURNING *`,
+      [codigo_sku, codigo_barras, nombre, descripcion, categoria, precio_base, costo, id, tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Producto no encontrado.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Producto actualizado con éxito.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error en actualizarProducto [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al actualizar el producto.' });
+  }
+};
+
+// 5. Eliminar / Desactivar producto (Eliminar)
+exports.eliminarProducto = async (req, res) => {
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+
+  try {
+    const result = await db.query(
+      `UPDATE productos SET activo = FALSE, actualizado_en = CURRENT_TIMESTAMP WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+      [id, tenant_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Producto no encontrado.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Producto eliminado correctamente.'
+    });
+  } catch (error) {
+    console.error('Error en eliminarProducto [Fligo]:', error);
+    res.status(500).json({ success: false, error: 'Error al eliminar el producto.' });
+  }
+};
