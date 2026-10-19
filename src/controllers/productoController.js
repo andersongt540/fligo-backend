@@ -271,14 +271,20 @@ exports.actualizarProducto = async (req, res) => {
   }
 };
 
-// 5. Eliminar / Desactivar producto (Eliminar)
+// 5. Eliminar / Desactivar producto (Eliminar y liberar SKU)
 exports.eliminarProducto = async (req, res) => {
   const { id } = req.params;
   const tenant_id = req.user.tenant_id;
 
   try {
     const result = await db.query(
-      `UPDATE productos SET activo = FALSE, actualizado_en = CURRENT_TIMESTAMP WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+      `UPDATE productos
+       SET activo = FALSE,
+           codigo_sku = codigo_sku || '_del_' || EXTRACT(EPOCH FROM NOW())::integer,
+           codigo_barras = CASE WHEN codigo_barras IS NOT NULL THEN codigo_barras || '_del_' || EXTRACT(EPOCH FROM NOW())::integer ELSE NULL END,
+           actualizado_en = CURRENT_TIMESTAMP
+       WHERE id = $1 AND tenant_id = $2
+       RETURNING id`,
       [id, tenant_id]
     );
 
