@@ -2,6 +2,23 @@ const db = require('../config/db');
 const configuracionController = require('./configuracionController');
 const { activeClient, activeStore, isUuid } = require('../utils/tenantValidation');
 
+async function obtenerTasaTenant(clientOrDb, tenant_id) {
+  try {
+    const configRes = await clientOrDb.query(
+      'SELECT tasa_cambio FROM configuracion_empresa WHERE tenant_id = $1',
+      [tenant_id]
+    );
+    const empresaTasa = configRes.rows[0]?.tasa_cambio ? Number(configRes.rows[0].tasa_cambio) : 1.0;
+    const bcv = await configuracionController.obtenerDatosTasasBcv();
+    const usd_ves = (empresaTasa > 1.0) ? empresaTasa : bcv.usd_ves;
+    const eur_ves = (empresaTasa > 1.0) ? empresaTasa * (bcv.eur_ves / bcv.usd_ves) : bcv.eur_ves;
+    return { usd_ves, eur_ves, fuente: empresaTasa > 1.0 ? 'Configuración de Empresa' : bcv.fuente };
+  } catch (error) {
+    console.error('Error resolviendo tasa tenant:', error);
+    return await configuracionController.obtenerDatosTasasBcv();
+  }
+}
+
 // 1. Crear Venta Directa (POS Móvil / Web) con descuento automático de Stock
 exports.registrarVenta = async (req, res) => {
   const { cliente_id, productos, metodo_pago, pagos, vuelto, descuento = 0, impuesto = 0, notas, tienda_id, cotizacion_id } = req.body;
@@ -13,6 +30,13 @@ exports.registrarVenta = async (req, res) => {
   let tasaPago = null;
   let igtfUsd = 0;
   let vueltoValidado = null;
+
+  try {
+    tasaPago = await obtenerTasaTenant(db, tenant_id);
+  } catch (error) {
+    console.error('Error en registrarVenta [Tasa]:', error);
+    tasaPago = { usd_ves: 1.0, eur_ves: 1.0, fuente: 'Fallback' };
+  }
 
   if (vuelto !== undefined) {
     const legacyChange = vuelto && ['VES', 'USD'].includes(vuelto.moneda);
@@ -302,27 +326,12 @@ exports.liquidarDeuda = async (req, res) => {
     return res.status(400).json({ success: false, error: 'La venta o los métodos y montos de pago indicados no son válidos.' });
   }
 
-  let tasas = null;
-  if (pagosValidados) {
-    try {
-      tasas = await configuracionController.obtenerDatosTasasBcv();
-    } catch (error) {
-      console.error('Error en liquidarDeuda [BCV]:', error);
-      return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para convertir los pagos y calcular el IGTF.' });
-    }
-    if (!(Number(tasas.usd_ves) > 0) || !(Number(tasas.eur_ves) > 0)) {
-      return res.status(502).json({ success: false, error: 'Las tasas BCV del dólar y euro deben ser válidas para liquidar la deuda.' });
-    }
-  } else if (metodoLegacy.startsWith('DIVISA ')) {
-    try {
-      tasas = await configuracionController.obtenerDatosTasasBcv();
-    } catch (error) {
-      console.error('Error en liquidarDeuda [BCV]:', error);
-      return res.status(502).json({ success: false, error: 'No se pudo consultar la tasa BCV para calcular el IGTF del pago en divisa.' });
-    }
-    if (!(Number(tasas.usd_ves) > 0)) {
-      return res.status(502).json({ success: false, error: 'La tasa BCV del dólar no es válida para calcular el IGTF.' });
-    }
+  let tasas;
+  try {
+    tasas = await obtenerTasaTenant(db, req.user.tenant_id);
+  } catch (error) {
+    console.error('Error en liquidarDeuda [Tasa]:', error);
+    tasas = { usd_ves: 1.0, eur_ves: 1.0, fuente: 'Fallback' };
   }
 
   let client;
