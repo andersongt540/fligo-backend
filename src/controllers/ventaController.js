@@ -5,17 +5,20 @@ const { activeClient, activeStore, isUuid } = require('../utils/tenantValidation
 async function obtenerTasaTenant(clientOrDb, tenant_id) {
   try {
     const configRes = await clientOrDb.query(
-      'SELECT tasa_cambio FROM configuracion_empresa WHERE tenant_id = $1',
+      'SELECT tasa_cambio, moneda_principal FROM configuracion_empresa WHERE tenant_id = $1',
       [tenant_id]
     );
     const empresaTasa = configRes.rows[0]?.tasa_cambio ? Number(configRes.rows[0].tasa_cambio) : 1.0;
+    const monedaPrincipal = configRes.rows[0]?.moneda_principal || 'USD';
     const bcv = await configuracionController.obtenerDatosTasasBcv();
     const usd_ves = (empresaTasa > 1.0) ? empresaTasa : bcv.usd_ves;
     const eur_ves = (empresaTasa > 1.0) ? empresaTasa * (bcv.eur_ves / bcv.usd_ves) : bcv.eur_ves;
-    return { usd_ves, eur_ves, fuente: empresaTasa > 1.0 ? 'Configuración de Empresa' : bcv.fuente };
+    const tasaPrincipal = (monedaPrincipal.toUpperCase() === 'EUR') ? eur_ves : usd_ves;
+    return { usd_ves, eur_ves, tasa_principal: tasaPrincipal, moneda_principal: monedaPrincipal, fuente: empresaTasa > 1.0 ? 'Configuración de Empresa' : bcv.fuente };
   } catch (error) {
     console.error('Error resolviendo tasa tenant:', error);
-    return await configuracionController.obtenerDatosTasasBcv();
+    const bcv = await configuracionController.obtenerDatosTasasBcv();
+    return { usd_ves: bcv.usd_ves, eur_ves: bcv.eur_ves, tasa_principal: bcv.usd_ves, moneda_principal: 'USD', fuente: bcv.fuente };
   }
 }
 
@@ -189,15 +192,16 @@ exports.registrarVenta = async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(400).json({ success: false, error: 'El impuesto y el descuento deben ser montos válidos no negativos.' });
     }
+    const tasaReferencia = tasaPago.tasa_principal || tasaPago.usd_ves;
     if (pagosValidados) {
-      let baseDivisaRestante = Math.max(0, Math.round((subtotalCalculado + impuestoBase - descuentoVenta) * tasaPago.usd_ves * 100));
+      let baseDivisaRestante = Math.max(0, Math.round((subtotalCalculado + impuestoBase - descuentoVenta) * tasaReferencia * 100));
       let igtfUsdCentimos = 0;
       pagosValidados.forEach(pago => {
         if (pago.metodo_pago !== 'DIVISA') return;
         const baseIgtfCentimos = Math.min(pago.monto_bs_centimos, baseDivisaRestante);
         baseDivisaRestante -= baseIgtfCentimos;
         pago.igtf_bs_centimos = Math.round(baseIgtfCentimos * 0.03);
-        igtfUsdCentimos += Math.round(pago.igtf_bs_centimos / tasaPago.usd_ves);
+        igtfUsdCentimos += Math.round(pago.igtf_bs_centimos / tasaReferencia);
       });
       igtfUsd = igtfUsdCentimos / 100;
     }
@@ -207,10 +211,10 @@ exports.registrarVenta = async (req, res) => {
       return res.status(400).json({ success: false, error: 'El total de la venta debe ser un monto válido mayor que cero.' });
     }
     if (pagosValidados) {
-      const totalDueBsCentimos = Math.round(totalCalculado * tasaPago.usd_ves * 100);
+      const totalDueBsCentimos = Math.round(totalCalculado * tasaReferencia * 100);
       const montoPagadoBsCentimos = pagosValidados.reduce((total, pago) => total + pago.monto_bs_centimos, 0);
       const vueltoBsCentimos = vueltoValidado
-        ? Math.round(vueltoValidado.usd * tasaPago.usd_ves * 100) + Math.round(vueltoValidado.ves * 100)
+        ? Math.round(vueltoValidado.usd * tasaReferencia * 100) + Math.round(vueltoValidado.ves * 100)
         : 0;
       const diferenciaBsCentimos = totalDueBsCentimos - (montoPagadoBsCentimos - vueltoBsCentimos);
       if (diferenciaBsCentimos > 500) {
