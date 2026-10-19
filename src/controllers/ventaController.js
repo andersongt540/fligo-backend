@@ -213,7 +213,7 @@ exports.registrarVenta = async (req, res) => {
         ? Math.round(vueltoValidado.usd * tasaPago.usd_ves * 100) + Math.round(vueltoValidado.ves * 100)
         : 0;
       const diferenciaBsCentimos = totalDueBsCentimos - (montoPagadoBsCentimos - vueltoBsCentimos);
-      if (Math.abs(diferenciaBsCentimos) > 500) {
+      if (diferenciaBsCentimos > 500) {
         await client.query('ROLLBACK');
         return res.status(400).json({ success: false, error: 'Los montos recibidos menos el vuelto deben cubrir el total de la venta.' });
       }
