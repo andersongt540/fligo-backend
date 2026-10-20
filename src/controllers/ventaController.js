@@ -373,6 +373,8 @@ exports.liquidarDeuda = async (req, res) => {
     let igtfUsdCentimos = 0;
     let igtfBsCentimos = 0;
     let pagosNota = null;
+    let montoPagadoUsdCentimos = 0;
+
     if (pagosValidados) {
       const tasaUsd = Number(tasas.usd_ves);
       const saldoBsCentimos = Math.round(saldoUsdCentimos * tasaUsd);
@@ -401,49 +403,66 @@ exports.liquidarDeuda = async (req, res) => {
           igtfBsCentimos: pagoIgtfBsCentimos
         };
       });
+
+      montoPagadoUsdCentimos = Math.round(montoPagadoBsCentimos / tasaUsd);
       const totalDebidoBsCentimos = saldoBsCentimos + igtfBsCentimos;
-      const diferenciaCentimos = totalDebidoBsCentimos - montoPagadoBsCentimos;
-      if (Math.abs(diferenciaCentimos) > 1000000) {
+
+      if (montoPagadoBsCentimos > totalDebidoBsCentimos + 100) {
         await client.query('ROLLBACK');
-        const mensajeConcepto = igtfBsCentimos > 0 ? 'el saldo y el IGTF' : 'el saldo pendiente';
         return res.status(400).json({
           success: false,
-          error: diferenciaCentimos > 0
-            ? `Los pagos no cubren ${mensajeConcepto}. Falta Bs. ${(diferenciaCentimos / 100).toFixed(2)}.`
-            : `Los pagos exceden ${mensajeConcepto} por Bs. ${(-diferenciaCentimos / 100).toFixed(2)}.`
+          error: `El monto pagado excede el saldo pendiente (${(totalDebidoBsCentimos / 100).toFixed(2)} Bs).`
         });
       }
+
       metodoPagoFinal = pagosConvertidos.length === 1
         ? pagosConvertidos[0].metodo_pago === 'DIVISA'
           ? `DIVISA ${pagosConvertidos[0].moneda}`
           : pagosConvertidos[0].metodo_pago
         : 'MIXTO';
-      pagosNota = `Pagos: ${pagosConvertidos.map(pago =>
+      pagosNota = `Abono/Pago: ${pagosConvertidos.map(pago =>
         `${pago.metodo_pago}${pago.metodo_pago === 'DIVISA' ? ` ${pago.moneda}` : ''} ${pago.monto.toFixed(2)} ${pago.moneda}`
       ).join('; ')}.`;
     } else if (metodoLegacy.startsWith('DIVISA ')) {
-      const baseBsCentimos = Math.round(saldoUsdCentimos * Number(tasas.usd_ves));
+      const tasaUsd = Number(tasas.usd_ves);
+      const montoPagoNum = Number(monto);
+      montoPagadoUsdCentimos = metodoLegacy.startsWith('DIVISA') ? Math.round(montoPagoNum * 100) : Math.round((montoPagoNum / tasaUsd) * 100);
+      const baseBsCentimos = Math.round(saldoUsdCentimos * tasaUsd);
       igtfBsCentimos = Math.round(baseBsCentimos * 0.03);
-      igtfUsdCentimos = Math.round(igtfBsCentimos / Number(tasas.usd_ves));
+      igtfUsdCentimos = Math.round(igtfBsCentimos / tasaUsd);
+    } else {
+      const tasaUsd = Number(tasas.usd_ves);
+      const montoPagoNum = Number(monto);
+      montoPagadoUsdCentimos = Math.round((montoPagoNum / tasaUsd) * 100);
     }
+
     const igtfUsd = igtfUsdCentimos / 100;
     const igtfBs = igtfBsCentimos / 100;
+
+    const principalPagadoCentimos = Math.min(saldoUsdCentimos, montoPagadoUsdCentimos);
+    const nuevoSaldoUsdCentimos = Math.max(0, saldoUsdCentimos - principalPagadoCentimos);
+    const nuevoSaldoUsd = nuevoSaldoUsdCentimos / 100;
+    const esPagadaCompletamente = nuevoSaldoUsd <= 0.01;
+
     const notaPago = [
-      `Deuda liquidada con ${metodoPagoFinal} el ${new Date().toISOString()}.`,
+      `Abono registrado con ${metodoPagoFinal} el ${new Date().toISOString()}.`,
       pagosNota,
-      igtfUsd > 0 ? `IGTF estimado 3%: Bs. ${igtfBs.toFixed(2)} (equivalente USD ${igtfUsd.toFixed(2)}).` : null
-    ].filter(Boolean).join(' ');
+      igtfUsd > 0 ? `IGTF 3%: Bs. ${igtfBs.toFixed(2)} (USD ${igtfUsd.toFixed(2)}).` : null,
+      esPagadaCompletamente ? 'Deuda liquidada en su totalidad.' : `Saldo pendiente restante: USD ${nuevoSaldoUsd.toFixed(2)}.`
+    ].filter(Boolean).join(' \n ');
+
     const result = await client.query(
       `UPDATE ventas
        SET metodo_pago = $1, impuesto = COALESCE(impuesto, 0) + $2, total = total + $2,
-           estado_pago = 'PAGADA', saldo_pendiente = 0,
-           notas = CONCAT_WS(E'\\n', NULLIF(notas, ''), NULLIF($3::text, ''))
-       WHERE id = $4 AND tenant_id = $5
+           estado_pago = CASE WHEN $3::numeric <= 0.01 THEN 'PAGADA' ELSE 'PENDIENTE' END,
+           saldo_pendiente = $3,
+           notas = CONCAT_WS(E'\\n', NULLIF(notas, ''), NULLIF($4::text, ''))
+       WHERE id = $5 AND tenant_id = $6
        RETURNING *`,
-      [metodoPagoFinal, igtfUsd, notaPago, id, req.user.tenant_id]
+      [metodoPagoFinal, igtfUsd, nuevoSaldoUsd, notaPago, id, req.user.tenant_id]
     );
     await client.query('COMMIT');
-    res.json({ success: true, message: 'Deuda liquidada correctamente.', igtf_bs: igtfBs, data: result.rows[0] });
+    res.json({ success: true, message: esPagadaCompletamente ? 'Deuda liquidada correctamente.' : 'Abono parcial registrado correctamente.', igtf_bs: igtfBs, data: result.rows[0] });
   } catch (error) {
     if (client) await client.query('ROLLBACK');
     console.error('Error en liquidarDeuda [Fligo]:', error);
